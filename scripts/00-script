@@ -1,0 +1,495 @@
+#!/bin/bash
+######################################################################
+##---------------- 1. Init & harmonize reference data ----------------##
+######################################################################
+# 1.1 create a directories
+mkdir admixture
+cd admixture
+mkdir addhealth # it stores raw addhealth genotype data
+mkdir hapmap3
+mkdir hgdp
+mkdir scripts
+
+
+# 1.2 install necessary software
+# get plink 1.9
+wget https://s3.amazonaws.com/plink1-assets/plink_linux_x86_64_20241022.zip
+unzip plink_linux_x86_64_20241022.zip
+rm plink_linux_x86_64_20241022.zip toy.* LICENSE prettify
+mv plink plink1.9
+
+# get plink2
+wget https://s3.amazonaws.com/plink2-assets/alpha4/plink2_linux_x86_64_20230621.zip
+unzip plink2_linux_x86_64_20230621.zip
+rm plink2_linux_x86_64_20230621.zip
+
+# get LiftOver and chain files
+wget https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver
+chmod +x ./liftOver
+wget http://hgdownload.soe.ucsc.edu/goldenPath/hg18/liftOver/hg18ToHg19.over.chain.gz
+gzip -d hg18ToHg19.over.chain.gz
+wget http://hgdownload.soe.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz
+gzip -d hg38ToHg19.over.chain.gz
+
+# get ADMIXTURE
+wget https://dalexander.github.io/admixture/binaries/admixture_linux-1.3.0.tar.gz
+tar -xvf admixture_linux-1.3.0.tar.gz
+mv dist/admixture_linux-1.3.0/admixture .
+rm admixture_linux-1.3.0.tar.gz
+rm -r dist
+
+
+# 1.3 get and prepare HapMap3
+cd hapmap3
+mkdir temp
+wget https://ftp.ncbi.nlm.nih.gov/hapmap/genotypes/hapmap3_r3/plink_format/hapmap3_r3_b36_fwd.qc.poly.tar.gz
+tar -xvf hapmap3_r3_b36_fwd.qc.poly.tar.gz
+rm -r hapmap3_r3_b36_fwd.qc.poly.tar.gz
+
+# relationship file for CEU, CHB, and YRI populations
+wget https://ftp.ncbi.nlm.nih.gov/hapmap/genotypes/hapmap3_r3/relationships_w_pops_041510.txt
+awk -F "\t" '{ if(($7 == "CEU") || ($7 == "CHB") || ($7 == "GIH") || ($7 == "YRI")) { print }}' relationships_w_pops_041510.txt > relation_4a.txt
+
+# merge data for CEU, CHB, and YRI 
+echo "hapmap3_r2_b36_fwd.qc.poly/hapmap3_r3_b36_fwd.CEU.qc.poly.ped hapmap3_r2_b36_fwd.qc.poly/hapmap3_r3_b36_fwd.CEU.qc.poly.map" > 3a.txt
+echo "hapmap3_r2_b36_fwd.qc.poly/hapmap3_r3_b36_fwd.CHB.qc.poly.ped hapmap3_r2_b36_fwd.qc.poly/hapmap3_r3_b36_fwd.CHB.qc.poly.map" >> 3a.txt
+echo "hapmap3_r2_b36_fwd.qc.poly/hapmap3_r3_b36_fwd.YRI.qc.poly.ped hapmap3_r2_b36_fwd.qc.poly/hapmap3_r3_b36_fwd.YRI.qc.poly.map" >> 3a.txt
+./../plink1.9 --merge-list 3a.txt \
+--make-bed \
+--out temp/hapmap_3a
+
+# only keep SNPs that passed QC in all populations
+for pop in CEU CHB YRI; do
+	for f in temp/hapmap_3a.* ; do mv $f ${f//hapmap/temp} ; done
+	./../plink1.9 --bfile temp/temp_3a \
+	--extract hapmap3_r2_b36_fwd.qc.poly/hapmap3_r3_b36_fwd.${pop}.qc.poly.map \
+	--make-bed \
+	--out temp/hapmap_3a
+done
+
+mv temp/hapmap_*a.* ./
+rm -r temp
+cd ..
+
+# map HapMap3 genomic build to CGRCh37
+awk '{print "chr" $1, $4 -1, $4, $2 }' hapmap3/hapmap_3a.bim | \
+sed 's/chr23/chrX/' | sed 's/chr24/chrY/' > \
+hapmap3/hapmap_3a.tolift
+./liftOver hapmap3/hapmap_3a.tolift hg18ToHg19.over.chain hapmap3/hapmap_hg19_3a hapmap3/unmapped_3a
+
+# ectract mapped SNPs and updated positions
+awk '{print $4}' hapmap3/hapmap_hg19_3a > hapmap3/hapmap_hg19_3a.snps
+awk '{print $4, $3}' hapmap3/hapmap_hg19_3a > hapmap3/hapmap_hg19_3a.pos
+
+# update HapMap3 to CGRCh37
+./plink1.9 --bfile hapmap3/hapmap_3a \
+--extract hapmap3/hapmap_hg19_3a.snps \
+--update-map hapmap3/hapmap_hg19_3a.pos \
+--make-bed \
+--out hapmap3/hapmap_hg19_3a
+
+# find compatible SNPs that overlap with AddHealth
+./plink1.9 --bfile hapmap3/hapmap_hg19_3a \
+--extract addhealth/ahgwas.bim \
+--make-just-bim \
+--out hapmap3/hapmap_common_3a
+
+./plink1.9 --bfile addhealth/ahgwas \
+--extract hapmap3/hapmap_hg19_3a.bim \
+--make-just-bim \
+--out addhealth/ah_common_3a
+
+echo 'library(data.table); library(magrittr); library(purrr)
+
+ah <- fread("addhealth/ah_common_3a.bim") %>%
+  setnames(., colnames(.), c("CHR", "SNP", "V3", "BP", "A1", "A2"))
+hapmap <- fread("hapmap3/hapmap_common_3a.bim") %>%
+  setnames(., colnames(.), c("CHR", "SNP", "V3", "BP", "B.A1", "B.A2"))
+
+joint <- merge(ah, hapmap, all = F)
+joint[, `:=`(C.A1 = fcase(B.A1 == "A", "T", B.A1 == "T", "A", B.A1 == "C", "G", B.A1 == "G", "C"),
+             C.A2 = fcase(B.A2 == "A", "T", B.A2 == "T", "A", B.A2 == "C", "G", B.A2 == "G", "C"))]
+
+# compatible SNPs
+compat <- joint[(A1==B.A1 & A2==B.A2) | (A1==C.A1 & A2==C.A2) | (A1==B.A2 & A2==B.A1) | (A1==C.A2 & A2==C.A1)]
+
+# SNPs to flip
+flip <- compat[!(A1==B.A1 & A2==B.A2) & !(A1==B.A2 & A2==B.A1)]
+
+fwrite(compat[, .(SNP, A1)], "hapmap3/comp_snp_3a.a1", col.names = F, sep = "\t")
+fwrite(flip[, .(SNP)], "hapmap3/flip_snp_3a.txt", col.names = F, sep = "\t")' > scripts/01a-find_flip_hapmap.R
+
+Rscript scripts/01a-find_flip_hapmap.R
+
+./plink1.9 --bfile addhealth/ahgwas \
+--extract hapmap3/comp_snp_3a.a1 \
+--make-bed \
+--out addhealth/ah_common_3a
+
+./plink1.9 --bfile hapmap3/hapmap_hg19_3a \
+--extract hapmap3/comp_snp_3a.a1 \
+--flip hapmap3/flip_snp_3a.txt \
+--a1-allele hapmap3/comp_snp_3a.a1 \
+--make-bed \
+--out hapmap3/hapmap_harmonized_3a
+
+
+# 1.4 get and prepare Human Genome Diversity Project (HGDP)
+# get hgdp files from PLINK 2.0 Resource
+cd hgdp
+wget https://www.dropbox.com/s/hppj1g1gzygcocq/hgdp_all.pgen.zst?dl=1
+wget https://www.dropbox.com/s/1mmkq0bd9ax8rng/hgdp_all.pvar.zst?dl=1
+wget https://www.dropbox.com/s/0zg57558fqpj3w1/hgdp.psam?dl=1
+
+# decompress
+./../plink2 --zst-decompress hgdp_all.pgen.zst?dl=1 > hgdp_all.pgen
+./../plink2 --zst-decompress hgdp_all.pvar.zst?dl=1 > hgdp_all.pvar
+./../plink2 --zst-decompress hgdp.psam?dl=1 > hgdp_all.psam
+cd ..
+
+# restrict to Native Americans, Middle East, & Oceanians
+awk -F "\t" '{ if(($1=="#IID") || ($3 == "Colombian") || ($3 == "Karitiana") || ($3 == "Maya") || ($3 == "Pima") || ($3 == "Surui") || \
+($3 == "Palestinian") || ($3 == "Bedouin") || ($3 == "Druze") || \
+($3 == "Bougainville") || ($3 == "PapuanHighlands") || ($3 == "PapuanSepik")) { print }}' hgdp/hgdp_all.psam > hgdp/hgdp_3a.psam
+
+# convert HGDP data to plink1.9 format
+./plink2 --pfile hgdp/hgdp_all \
+--max-alleles 2 \
+--keep hgdp/hgdp_3a.psam \
+--output-chr 26 \
+--make-bed \
+--out hgdp/hgdp_3a
+
+# map HGDP genomic build to CGRCh37
+awk '{print "chr" $1, $4 -1, $4, $2 }' hgdp/hgdp_3a.bim | \
+sed 's/chr23/chrX/' | sed 's/chr24/chrY/' > \
+hgdp/hgdp_3a.tolift
+./liftOver hgdp/hgdp_3a.tolift hg38ToHg19.over.chain hgdp/hgdp_hg19 hgdp/unmapped
+
+# extract mapped SNPs and updated positions
+awk '{print $4}' hgdp/hgdp_hg19 > hgdp/hgdp_hg19.snps
+awk '{print $4, $3}' hgdp/hgdp_hg19 > hgdp/hgdp_hg19.pos
+
+# update HGDP to CGRCh37
+./plink1.9 --bfile hgdp/hgdp_3a \
+--make-bed \
+--out hgdp/hgdp_temp
+
+./plink1.9 --bfile hgdp/hgdp_temp \
+--set-missing-var-ids @:#[b37]\$1,\$2 \
+--extract hgdp/hgdp_hg19.snps \
+--update-map hgdp/hgdp_hg19.pos \
+--make-bed \
+--out hgdp/hgdp_hg19
+
+# find compatible SNPs that overlap with AddHealth & HapMap3
+./plink1.9 --bfile hgdp/hgdp_hg19 \
+--extract addhealth/ah_common_3a.bim \
+--make-just-bim \
+--out hgdp/hgdp_common_3a
+
+./plink1.9 --bfile addhealth/ah_common_3a \
+--extract hgdp/hgdp_hg19.bim \
+--make-just-bim \
+--out addhealth/ah_common2_3a
+
+echo 'library(data.table); library(magrittr); library(purrr)
+
+ah <- fread("addhealth/ah_common2_3a.bim") %>%
+  setnames(., colnames(.), c("CHR", "SNP", "V3", "BP", "A1", "A2"))
+hgdp <- fread("hgdp/hgdp_common_3a.bim") %>%
+  setnames(., colnames(.), c("CHR", "SNP", "V3", "BP", "B.A1", "B.A2"))
+
+joint <- merge(ah, hgdp, all = F)
+joint[, `:=`(C.A1 = fcase(B.A1 == "A", "T", B.A1 == "T", "A", B.A1 == "C", "G", B.A1 == "G", "C"),
+             C.A2 = fcase(B.A2 == "A", "T", B.A2 == "T", "A", B.A2 == "C", "G", B.A2 == "G", "C"))]
+
+# compatible SNPs
+compat <- joint[(A1==B.A1 & A2==B.A2) | (A1==C.A1 & A2==C.A2) | (A1==B.A2 & A2==B.A1) | (A1==C.A2 & A2==C.A1)]
+
+# SNPs to flip
+flip <- compat[!(A1==B.A1 & A2==B.A2) & !(A1==B.A2 & A2==B.A1)]
+
+fwrite(compat[, .(SNP, A1)], "hgdp/comp_snp_3a.a1", col.names = F, sep = "\t")
+fwrite(flip[, .(SNP)], "hgdp/flip_snp_3a.txt", col.names = F, sep = "\t")' > scripts/01b-find_flip_hgdp.R
+
+Rscript scripts/01b-find_flip_hgdp.R
+
+./plink1.9 --bfile addhealth/ah_common_3a \
+--extract hgdp/comp_snp_3a.a1 \
+--make-bed \
+--out addhealth/ah_common2_3a
+
+./plink1.9 --bfile hapmap3/hapmap_harmonized_3a \
+--extract hgdp/comp_snp_3a.a1 \
+--make-bed \
+--out hapmap3/hapmap_harmonized2_3a
+
+./plink1.9 --bfile hgdp/hgdp_hg19 \
+--extract hgdp/comp_snp_3a.a1 \
+--flip hgdp/flip_snp_3a.txt \
+--a1-allele hgdp/comp_snp_3a.a1 \
+--make-bed \
+--out hgdp/hgdp_harmonized_3a
+
+
+
+###################################################
+##---------------- 2. LD pruning ----------------##
+###################################################
+# 2.1 LD pruning for unsupervised ADMIXTURE
+./plink1.9 --bfile addhealth/ahgwas \
+--indep-pairwise 200 25 0.4 \
+--out addhealth/plink
+
+./plink1.9 --bfile addhealth/ahgwas \
+--extract addhealth/plink.prune.in \
+--make-bed \
+--out addhealth/ahpruned # 281087 variants
+
+
+# 2.2 LD pruning for supervised ADMIXTURE
+./plink1.9 --bfile addhealth/ah_common2_3a \
+--indep-pairwise 200 25 0.4 \
+--out addhealth/plink_s2_3a
+
+./plink1.9 --bfile addhealth/ah_common2_3a \
+--extract addhealth/plink_s2_3a.prune.in \
+--make-bed \
+--out addhealth/ahpruned_s2_3a # 210976 variants
+
+
+
+##################################################################################
+##---------------- 3. Data preparation before ADMXITURE ----------------##
+##################################################################################
+# 3.1 select unrelated AddHealth individuals
+echo "library(readr); library(tidyr); library(dplyr); library(purrr)
+
+dat <- list(read_table('addhealth/ahgwas.fam', col_names = c('FID', 'IID', 'F', 'M', 'S', 'P'))) # N = 9974
+dat <- append(dat, read_table('hapmap3/relation_4a.txt', col_names = c('FID', 'IID', 'F', 'M', 'S', 'P', 'Pop')) %>%
+  group_by(Pop) %>%
+  group_split())
+
+set.seed(218)
+
+unrelated <- dat %>%
+  map(~{
+    .x <- .x %>%
+      group_by(FID) %>%
+      slice_sample(n = 1)
+  })
+
+write.table(unrelated[[1]], 'addhealth/ahgwas_unrelated.fam', row.names = F, col.names = F)
+write.table(bind_rows(unrelated[c(2,3,5)]), 'hapmap3/hapmap_unrelated_3a.txt', quote = F, row.names = F, col.names = F)
+# write.table(unrelated[2:5], 'hapmap3/hapmap_unrelated_4a.txt', quote = F, row.names = F, col.names = F)" > scripts/02-select_unrelated.R
+
+Rscript scripts/02-select_unrelated.R
+
+./plink1.9 --bfile addhealth/ahpruned \
+--keep addhealth/ahgwas_unrelated.fam \
+--chr 1-22 \
+--make-bed \
+--out addhealth/ah_us_nosex
+
+./plink1.9 --bfile addhealth/ahpruned_s2_3a \
+--keep addhealth/ahgwas_unrelated.fam \
+--make-bed \
+--out addhealth/ah_unrel_s2_3a
+
+
+# 3.2 extract unrelated individuals & pruned SNPs for HapMap3 & HGDP
+./plink1.9 --bfile hapmap3/hapmap_harmonized2_3a \
+--keep hapmap3/hapmap_unrelated_3a.txt \
+--extract addhealth/plink_s2_3a.prune.in \
+--a1-allele addhealth/ah_unrel_s2_3a.bim 5 2 \
+--make-bed \
+--out hapmap3/hapmap_unrel2_3a
+
+./plink1.9 --bfile hgdp/hgdp_harmonized_3a \
+--extract addhealth/plink_s2_3a.prune.in \
+--a1-allele addhealth/ah_unrel_s2_3a.bim 5 2 \
+--make-bed \
+--out hgdp/hgdp_pruned_3a
+
+
+# 3.3 create reference samples from HGDP for supervised ADMIXTURE k = 4 ~ 6
+# for supervised ADMIXTURE k = 4
+awk -F "\t" '($1=="#IID" || $3 == "Maya" || $3 == "Pima")' hgdp/hgdp_all.psam | cut -f1 | tail -n +2 > hgdp/hgdp_s4.txt
+grep -F -f hgdp/hgdp_s4.txt hgdp/hgdp_3a.fam > hgdp/hgdp_s4.fam
+
+# for supervised 5 ADMIXTURE k = 5
+awk -F "\t" '($1=="#IID" || $3 == "Maya" || $3 == "Pima" || \
+$3 == "Palestinian" || $3 == "Bedouin" || $3 == "Druze")' \
+hgdp/hgdp_all.psam | cut -f1 | tail -n +2 > hgdp/hgdp_s5.txt
+grep -F -f hgdp/hgdp_s5.txt hgdp/hgdp_3a.fam > hgdp/hgdp_s5.fam
+
+# for supervised ADMIXTURE k = 6
+awk -F "\t" '($1=="#IID" || $3 == "Maya" || $3 == "Pima" || \
+$3 == "Palestinian" || $3 == "Bedouin" || $3 == "Druze" || \
+$3 == "Bougainville" || $3 == "PapuanHighlands" || $3 == "PapuanSepik")' \
+hgdp/hgdp_all.psam | cut -f1 | tail -n +2 > hgdp/hgdp_s6.txt
+grep -F -f hgdp/hgdp_s6.txt hgdp/hgdp_3a.fam > hgdp/hgdp_s6.fam
+
+for k in {4..6}; do
+	./plink1.9 --bfile hgdp/hgdp_pruned_3a \
+	--keep hgdp/hgdp_s${k}.fam \
+	--make-bed \
+	--out hgdp/hgdp_tomerge_s${k}
+done
+
+
+# 3.4 merge AddHealth, HapMap3, and HGDP to create genetic files for supervised ADMIXTURE k = 2~6
+# for supervised ADMIXTURE k = 3
+./plink1.9 --bfile addhealth/ah_unrel_s2_3a \
+--bmerge hapmap3/hapmap_unrel2_3a \
+--chr 1-22 \
+--make-bed \
+--out ah_hapmap3_s3_nosex
+cut -f1,2 ah_hapmap3_s3_nosex.bim > temp_s3.txt
+
+# for supervised ADMIXTURE k = 2
+awk '$7 == "CHB"' hapmap3/relation_4a.txt | cut -f1,2 > hapmap3/CHB.txt
+./plink1.9 --bfile ah_hapmap3_s3_nosex \
+--remove hapmap3/CHB.txt \
+--make-bed \
+--out ah_hapmap3_s2_nosex # 9285 people remain
+cut -f1,2 ah_hapmap3_s2_nosex.bim > temp_s2.txt
+
+# for supervised ADMIXTURE k = 4 ~ 6
+for k in {4..6}; do
+	echo "hgdp/hgdp_tomerge_s${k}" > hapmap3_hgdp_s${k}.txt
+	echo "hapmap3/hapmap_unrel2_3a" >> hapmap3_hgdp_s${k}.txt
+
+	./plink1.9 --bfile addhealth/ah_unrel_s2_3a \
+	--merge-list hapmap3_hgdp_s${k}.txt \
+	--chr 1-22 \
+	--make-bed \
+	--out ah_hapmap3_hgdp_s${k}_nosex
+
+	cut -f1,2 ah_hapmap3_hgdp_s${k}_nosex.bim > temp_s${k}.txt
+done
+rm temp_*.txt
+
+
+# 3.5 prepare the .pop files for supervised ADMIXTURE k = 2 ~ 6
+echo 'library(readr); library(tidyr); library(dplyr); library(purrr)
+
+rel_hapmap <- read_table("hapmap3/relation_4a.txt", 
+                    col_names = c("FID","IID","F","M","S","P","A"),
+                    col_types = "ccccnnc") %>% select(-P)
+hgdp_3a <- read_table("hgdp/hgdp_3a.psam") %>% select(IID = `#IID`, A = region)
+ah_hapmap <- read_table("ah_hapmap3_s3_nosex.fam", col_names = c("FID","IID","F","M","S","P"),
+                        col_types = "ccccnn")
+ah_hapmap_hgdp <- list()
+for (k in paste0("s", 4:6)) {
+  ah_hapmap_hgdp[[k]] <- read_table(paste0("ah_hapmap3_hgdp_",k,"_nosex.fam"), 
+                                    col_names = c("FID","IID","F","M","S","P"),
+                                    col_types = "ccccnn") %>% select(-P) %>%
+    left_join(hgdp_3a)
+}
+
+merge <- ah_hapmap_hgdp %>% map(~{
+  .x <- .x %>%
+    left_join(rel_hapmap %>% rename(Ah = A)) %>%
+    mutate(A = case_when(
+      A=="AMERICA" ~ "NA",
+      A=="MIDDLE_EAST" ~ "ME",
+      A=="OCEANIA" ~ "OC",
+      !is.na(Ah) ~ Ah,
+      T ~ "-"
+    )) %>%
+    select(-Ah)
+})
+
+merge2 <- ah_hapmap %>%
+  left_join(rel_hapmap) %>%
+  mutate(A = ifelse(is.na(A), "-", A))
+  
+lapply(merge, function(d) {
+  table(d$A, useNA = "ifany")
+})
+table(merge2$A, useNA = "ifany")
+
+lapply(paste0("s", 4:6), function(k) {
+  write.table(merge[[k]]$A, paste0("ah_hapmap3_hgdp_", k, "_nosex.pop"), 
+              quote = F, row.names = F, col.names = F)
+})
+write.table(merge2[merge2$A!="CHB",]$A, "ah_hapmap3_s2_nosex.pop", quote = F, row.names = F, col.names = F)
+write.table(merge2$A, "ah_hapmap3_s3_nosex.pop", quote = F, row.names = F, col.names = F)' > scripts/03-create_pop.R
+
+Rscript scripts/03-create_pop.R
+
+
+
+##################################################
+##---------------- 4. ADMXITURE ----------------##
+##################################################
+# 4.1 unsupervised ADMIXTURE k = 2~6 on unrelated individuals
+for k in {2..6}; do
+	./admixture -B addhealth/ah_us_nosex.bed $k -j40 -s 218 | tee unadm${k}.out
+done
+
+
+# 4.2 run unsupervised ADMIXTURE in projection mode for the remaining individuals
+# extract the remaining AddHealth individuals
+./plink1.9 --bfile addhealth/ahpruned \
+--remove addhealth/ahgwas_unrelated.fam \
+--extract addhealth/ah_us_nosex.bim \
+--a1-allele addhealth/ah_us_nosex.bim 5 2 \
+--make-bed \
+--out addhealth/ah_rest_nosex
+
+for k in {2..6}; do \
+	# use learned allele frequencies as input for ADMIXTURE projection
+	scp ah_us_nosex.${k}.P ah_rest_nosex.${k}.P.in
+	# run ADMIXTURE projection
+	./admixture -B -P addhealth/ah_rest_nosex.bed $k -j40 -s 218 | tee unadm${k}_proj.out
+done
+
+
+# 4.3 supervised ADMIXTURE k = 2~6 on unrelated individuals
+for k in 2 3; do
+	./admixture -B ah_hapmap3_s${k}_nosex.bed $k --supervised -j40 -s 218 | tee sadm${k}.out
+done
+
+for k in {4..6}; do
+	./admixture -B ah_hapmap3_hgdp_s${k}_nosex.bed $k --supervised -j40 -s 218 | tee sadm${k}.out
+done
+
+
+# 4.4 run supervised ADMIXTURE in projection mode for the remaining individuals
+# extract the remaining AddHealth individuals
+for k in 2 3; do
+	./plink1.9 --bfile addhealth/ahpruned_s2_3a \
+	--remove addhealth/ahgwas_unrelated.fam \
+	--extract ah_hapmap3_s${k}_nosex.bim \
+	--a1-allele ah_hapmap3_s${k}_nosex.bim 5 2 \
+	--make-bed \
+	--out addhealth/ah_rest_s${k}_nosex
+done
+
+for k in {4..6}; do
+	./plink1.9 --bfile addhealth/ahpruned_s2_3a \
+	--remove addhealth/ahgwas_unrelated.fam \
+	--extract ah_hapmap3_hgdp_s${k}_nosex.bim \
+	--a1-allele ah_hapmap3_hgdp_s${k}_nosex.bim 5 2 \
+	--make-bed \
+	--out addhealth/ah_rest_s${k}_nosex
+done
+
+for k in 2 3; do
+	# use learned allele frequencies as input
+	scp ah_hapmap3_s${k}_nosex.${k}.P ah_rest_s${k}_nosex.${k}.P.in
+	# run ADMIXTURE projection
+	./admixture -B -P addhealth/ah_rest_s${k}_nosex.bed $k -j40 -s 218 | tee sadm${k}_proj.out
+done
+
+for k in {4..6}; do
+	# use learned allele frequencies as input
+	scp ah_hapmap3_hgdp_s${k}_nosex.${k}.P ah_rest_s${k}_nosex.${k}.P.in
+	# run ADMIXTURE projection
+	./admixture -B -P addhealth/ah_rest_s${k}_nosex.bed $k -j40 -s 218 | tee sadm${k}_proj.out
+done
+
+
