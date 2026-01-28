@@ -1,7 +1,8 @@
 # 0. Init ----------------------------------------------------------------------
-library(readxl); library(tidyverse); library(RColorBrewer); library(gtsummary)
+library(tidyverse); library(RColorBrewer); library(modelsummary); library(gtsummary)
 library(cowplot); library(gridExtra); library(Hmisc)
 
+race_label <- c('NHW', 'NHB', 'AINA', 'AAPI', 'Hispanic')
 region_label <- c('Europe', 'The Americas', 'Sub-Saharan Africa', 'Eastern Asia & Oceania', 'Middle East & Southern Asia')
 subregion_label <- c('Sub-Saharan Africa', 'British Isles', 'East Europe', 'North Europe',
                   'South Europe', 'West Europe', 'East Asia', 'Oceania', 'Philippines',
@@ -20,21 +21,35 @@ theme_custom <- function() {
                                     margin=margin(0,0,5.5,0)))
 }
 
-fam_origin <- readRDS('addhealth/family_origin_dum.rds')
-meta <- readRDS('region_meta.rds')
-
 
 
 # 1. Admixture plot ------------------------------------------------------------
-my_admx_plot <- function(data, regions) {
+my_admx_plot <- function(data, regions, by_EUR, stacking_order) {
+  # genetic similarity proportions in descending orders
+  order <- data %>%
+    filter(!is.na(region)) %>%
+    group_by(region) %>%
+    summarise(across(starts_with('X'), mean, na.rm = T)) %>%
+    gather(anc, value, starts_with('X')) %>%
+    arrange(region, -value)
+  
   # prepare data for visualization
   plot_data <- list()
   for (reg in regions) {
+    if (by_EUR) {
       plot_data[[reg]] <- data %>% 
         filter(region==reg) %>%
         arrange(region, -X2) %>% 
         mutate(n = row_number()) %>%
         gather('X', 'pc', starts_with('X'))
+    } else {
+      order_x <- order[order$region==reg,] %>% pull(anc)
+      plot_data[[reg]] <- data %>% 
+        filter(region==reg) %>%
+        arrange(across(order_x, desc)) %>% 
+        mutate(n = row_number()) %>%
+        gather('X', 'pc', starts_with('X'))
+    }
   }
   plot_data <- bind_rows(plot_data) %>%
     mutate(region = factor(region, levels = regions),
@@ -43,7 +58,7 @@ my_admx_plot <- function(data, regions) {
                          X=='X3' ~ 'EAS',
                          X=='X4' ~ 'IAM', 
                          X=='X5' ~ 'MEA',
-                         T ~ NA) %>% factor(levels = c('EUR', 'MEA', 'EAS', 'IAM', 'AFR')))
+                         T ~ NA) %>% factor(levels = stacking_order))
   
   # add sample size
   text_data <- plot_data %>% 
@@ -77,7 +92,7 @@ my_admx_plot <- function(data, regions) {
 
 
 
-# 2. Scatter plot with marginal rug plot ---------------------------------------
+# 2. Scatter plots with marginal density ---------------------------------------------------
 my_scatter_rug_plot <- function(data, x_label, y_label, legend_label = F) {
   data <- data %>% filter(!is.na(color), x>=0.01, y>=0.01)
   
@@ -88,7 +103,7 @@ my_scatter_rug_plot <- function(data, x_label, y_label, legend_label = F) {
   rho_exp <- paste0('rho ~ "=" ~"', sprintf('%.3f', rho),'"')
   beta_exp <- paste0('beta ~ "=" ~"', sprintf('%.3f', beta),'"')
   n_exp <- paste0('N ~ "=" ~"', n,'"')
-
+  
   # scatter plot
   scatter <- data %>%
     ggplot(aes(x = x, y = y, color = color)) + 
@@ -131,8 +146,12 @@ my_scatter_rug_plot <- function(data, x_label, y_label, legend_label = F) {
           legend.position = 'none')
   
   # combine the scatter and rug plots
-  p <- plot_grid(rug, scatter, nrow = 2, align = 'v', axis = 'l', rel_heights = c(1,5))
-
+  if (length(unique(data$color))==1) {
+    p <- scatter
+  } else {
+    p <- plot_grid(rug, scatter, nrow = 2, align = 'v', axis = 'l', rel_heights = c(1,5))
+  }
+  
   return(p)
 }
 
@@ -156,9 +175,26 @@ add_mean_sd_general <- function(data, variable, keep_var, ...) {
 }
 
 # function for creating summary statistic table based on geographic ancestry
-summarytable <- function(data, results, by_var_label) {
+summarytable <- function(data, results, drop_smallgroup, no_AmericaCanada,
+                         single_anc, ancestry_subsample, by_var_label) {
+  
+  add_mean_sd <- partial(add_mean_sd_general, keep_var = results)
+  
+  if (drop_smallgroup) {
+    data <- data %>% filter(!small_group)
+  }
+  if (no_AmericaCanada) {
+    data <- data %>% filter(by_var!='America', by_var!='Canada')
+  }
+  if (single_anc) {
+    data <- data %>% filter(single_anc==1)
+  }
+  if (ancestry_subsample) {
+    data <- data %>% filter(ancestry_subsample==1)
+  }
   # data for the summary statistic table
-  tbl_data <- data %>% 
+  tab_dat <- data %>% 
+    # remove other and NA ancestries from the table
     filter(!(by_var %in% c('Other', NA))) %>%
     select(all_of(results), by_var) %>%
     group_by(by_var) %>%
@@ -168,22 +204,21 @@ summarytable <- function(data, results, by_var_label) {
       by_var = ifelse(is.na(by_var), 'NA', as.character(by_var))
     ) 
   
-  # rank ancestral regions/subregions by frequency
-  subregion_label_freq <- tbl_data[,c('size','by_var')] %>% 
+  # rank geographic ancestry categories by frequency
+  region_label_freq <- tab_dat[,c('size','by_var')] %>% 
     unique() %>%
     arrange(-size) %>% 
     pull(by_var) %>%
     as.character()
-  tbl_data <- tbl_data %>%
-    mutate(by_var = factor(by_var, levels = subregion_label_freq))
+  tab_dat <- tab_dat %>%
+    mutate(by_var = factor(by_var, levels = region_label_freq))
   
   # create table
-  add_mean_sd <- partial(add_mean_sd_general, keep_var = results)
-  t <- tbl_data %>%
-    # proportion of each family origin
+  t <- tab_dat %>%
+    # proportion of each geographic ancestry category
     tbl_summary(     
       include = by_var,
-      statistic = all_categorical() ~ '{n} ({p}%)',
+      statistic = all_categorical() ~ '{n} ({p}%)', # '{n}/n({p}%)
       digits = everything() ~ 0,
       label = by_var ~ by_var_label
     ) %>% 
@@ -192,6 +227,7 @@ summarytable <- function(data, results, by_var_label) {
       all_categorical() ~ add_mean_sd,
       location = all_categorical() ~ 'level'
     ) %>%
+    # remove footnote
     modify_footnote(c(all_stat_cols()) ~ NA)
   
   return(t)
@@ -238,13 +274,6 @@ create_mean <- function(data, results, by_var) {
   return(sum_tbl)
 }
 
-# find the 10th and 90th percentiles of genetic similarity proportions by fractional geographic ancestry
-create_percentile <- eval(parse(text = deparse(create_mean) %>%
-                                  str_replace_all('weighted\\.mean\\(dat\\[\\[a\\]\\], dat\\[\\[c\\]\\]\\)', 
-                                                  'wtd.quantile(dat[[a]], weights = dat[[c]], probs = c(0.1, 0.9))') %>%
-                                  str_replace_all('sprintf\\(\\"%.2f\\", wm\\)', 
-                                                  "paste0(\"(\", sprintf(\"%.2f\", wm[[1]]), \", \", sprintf(\"%.2f\", wm[[2]]), \")\")")))
-
 # function for creating summary statistic tables based on fractional geographic ancestry
 summarytable2 <- function(data, results) {
   # subregion-level table
@@ -270,10 +299,16 @@ summarytable2 <- function(data, results) {
     select(Region, Subregion, N, prop, all_of(results)) %>%
     arrange(Region, Subregion)
   names(total_tbl) <- gsub('N', paste0('N = ', sprintf('%.0f',sum(sum_tbl$N))), names(total_tbl))
-  # names(total_tbl) <- gsub('(us\\d+_)|(s\\d+_)', '', names(total_tbl))
-  
+
   return(total_tbl)
 }
+
+# find the 10th and 90th percentiles of genetic similarity proportions by fractional geographic ancestry
+create_percentile <- eval(parse(text = deparse(create_mean) %>%
+                                  str_replace_all('weighted\\.mean\\(dat\\[\\[a\\]\\], dat\\[\\[c\\]\\]\\)', 
+                                                  'wtd.quantile(dat[[a]], weights = dat[[c]], probs = c(0.1, 0.9))') %>%
+                                  str_replace_all('sprintf\\(\\"%.2f\\", wm\\)', 
+                                                  "paste0(\"(\", sprintf(\"%.2f\", wm[[1]]), \", \", sprintf(\"%.2f\", wm[[2]]), \")\")")))
 
 summarytable3 <- eval(parse(text = deparse(summarytable2) %>%
                               str_replace_all('create_mean', 'create_percentile')))

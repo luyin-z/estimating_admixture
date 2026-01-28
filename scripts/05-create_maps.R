@@ -1,8 +1,11 @@
 # 0. Init ----------------------------------------------------------------------
-library(here); library(data.table); library(tidyverse); library(rnaturalearth); library(giscoR); library(sf)
+library(here); library(data.table)
+library(tidyverse); library(rnaturalearth); library(giscoR); library(sf)
 library(cowplot); library(ggtext)
 
 setwd(str_remove(here(),'/scripts'))
+
+fig_format <- '.pdf'
 
 
 
@@ -13,14 +16,10 @@ all <- readRDS('all_data.rds') %>%
       mutate(`SUBREG US & Canada` = `SUBREG America` + `SUBREG Canada`) %>%
       select(-c(`SUBREG America`, `SUBREG Canada`))
   })
-hapmap3 <- fread('hapmap3/relation_4a.txt', select = c(2,7), col.names = c('IID', 'pop')) %>%
-  filter(pop != 'GIH')
-hgdp <- fread('hgdp/hgdp_all.psam', select = c(1,3), col.names = c('IID', 'pop'))
-ref <- fread('ah_hapmap3_hgdp_s5_nosex.fam', select = 2, col.names = 'IID')
 
 
 # 1.1 create subregion-level ancestry proportions and sample size
-freq_anc <- all$s5 %>%
+freq_anc <- all$s4 %>%
   select(starts_with('SUBREG ')) %>%
   drop_na() %>%
   colSums(na.rm = T) %>%
@@ -29,9 +28,9 @@ freq_anc <- all$s5 %>%
 names(freq_anc) <- c('subregion', 'n')
 
 s <- list()
-for (c in names(all$s5 %>% select(starts_with('SUBREG ')))) {
-  for (a in paste0('X',1:5)) {
-    dat <- all$s5[all$s5[[c]]>0,] %>% 
+for (c in names(all$s4 %>% select(starts_with('SUBREG ')))) {
+  for (a in paste0('X',1:4)) {
+    dat <- all$s4[all$s4[[c]]>0,] %>% 
       select(c, a) %>%
       drop_na()
     s[[c]][[a]] <- weighted.mean(dat[[a]], dat[[c]])
@@ -41,16 +40,23 @@ for (c in names(all$s5 %>% select(starts_with('SUBREG ')))) {
 freq_anc <- freq_anc %>% 
   left_join(bind_rows(s, .id = 'subregion')) %>%
   mutate(subregion = str_remove(subregion, 'SUBREG '), n = round(n)) %>%
-  filter(!subregion %in% c('Other','US & Canada'))
+  filter(subregion!='Other')
 
 
 # 1.2 create country-level sample size
-cntr_freq <- all$s5 %>%
+cntr_freq <- all$s4 %>%
   select(paste('SUBREG', c('Sub-Saharan Africa', 'British Isles', 'South America', 'Central America')),
          starts_with('CNTR ')) %>%
   mutate(`CNTR United States` = `CNTR America`, `CNTR Native America` = `CNTR American Indian`,
          `CNTR China` = `CNTR China` + `CNTR Taiwan (China)`) %>%
-  select(-c(`CNTR America`, `CNTR American Indian`, `CNTR Taiwan (China)`)) %>%
+  select(-c(paste('CNTR', c('Unknown Sub-Saharan Africa', 'Ireland', 'Scotland',
+                            'England', 'Uganda', 'Egypt', 'Wales', 'Unknown British Isles',
+                            'Unknown Great Britain', 'Other Sub-Saharan Africa',
+                            'Other North Africa', 'Macau (China)', 'Nigeria',
+                            'Nicaragua', 'Other Central America', 'El Salvador',
+                            'Honduras', 'Unknown Central America', 'Other South America',
+                            'Colombia, Guyana, Venezuela', 'Unknown South America')),
+            `CNTR America`, `CNTR American Indian`, `CNTR Taiwan (China)`)) %>%
   drop_na() %>%
   colSums(na.rm = T) %>%
   as.data.frame() %>%
@@ -93,14 +99,14 @@ subregion_grp <- ne_countries(scale = 'medium', returnclass = 'sf',
 world_data <- gisco_get_countries() %>%
   # remove Antarctica
   filter(ISO3_CODE!='ATA') %>%
-  left_join(subregion_grp %>%
-              as.data.frame() %>%
+  left_join(as.data.frame(subregion_grp) %>%
               select(geounit, ISO3_CODE = iso_a3, subregion)) %>%
   mutate(
     subregion = case_when(
       ISO3_CODE %in% c('ATG') ~ 'Caribbean',
       ISO3_CODE %in% c('GEO') ~ 'East Europe',
       ISO3_CODE %in% c('BEL', 'FRA') ~ 'West Europe',
+      # ISO3_CODE %in% c('BEL') ~ 'West Europe',
       ISO3_CODE %in% c('BIH','SRB', 'PRT') ~ 'South Europe',
       ISO3_CODE %in% c('PSE') ~ 'Middle East',
       ISO3_CODE %in% c('PNG') ~ 'Oceania',
@@ -132,13 +138,21 @@ USC_data <- world_data %>%
 subregion_data <- world_data %>%
   group_by(subregion) %>%
   summarise()
+
+# remove French Guiana from the 'West Europe' area
 subregion_data[subregion_data$subregion=='West Europe',]$geometry <- 
-  # remove French Guiana from the 'West Europe' area
   st_difference(subregion_data[subregion_data$subregion=='West Europe',]$geometry, french_guiana$geometry)
 
 # get the centroid coordinates from the 'Native America' geometry data
-NA_coord <- st_coordinates(st_centroid(native_america)) %>%
-  cbind(native_america)
+text_data <- st_coordinates(st_centroid(subregion_data)) %>%
+  cbind(subregion_data) %>%
+  rbind(
+    st_coordinates(st_centroid(native_america)) %>%
+      cbind(native_america)
+  )
+
+NA_coord <- text_data %>% 
+  filter(subregion=='Native America')
 
 
 # 1.4 prepare country-level geometry data
@@ -172,8 +186,9 @@ country_grp <- world_data %>%
 country_data <- country_grp %>%
   group_by(country) %>%
   summarise()
+
+# remove French Guiana from the France area
 country_data[country_data$country=='France',]$geometry <- 
-  # remove French Guiana from the France area
   st_difference(country_data[country_data$country=='France',]$geometry, french_guiana$geometry)
 
 # country without sample coverage
@@ -183,53 +198,32 @@ country_NA <- country_data %>%
   summarise()
 
 
-# 1.5 prepare coordinates for HapMap3 & HGDP samples
-ref <- ref %>% 
-  inner_join(hgdp %>% rbind(hapmap3)) %>%
-  group_by(pop) %>%
-  summarise(n = n()) %>%
-  mutate(ancestry = case_when(
-    pop=='YRI' ~ 'Sub-Saharan African',
-    pop=='CEU' ~ 'European',
-    pop=='CHB' ~ 'East Asian',
-    pop %in% c('Maya', 'Pima') ~ 'Indigenous American',
-    T ~ 'Middle Eastern'
-  ),
-  country = case_when(
-    pop=='YRI' ~ 'Nigeria',
-    pop=='CEU' ~ 'United States',
-    pop=='CHB' ~ 'China',
-    pop %in% c('Maya', 'Pima') ~ 'Mexico',
-    T ~ 'Israel'
-  ),
-  state = case_when(
-    pop=='YRI' ~ 'Oyo', # Ibadan
-    pop=='CEU' ~ 'Utah',
-    pop=='CHB' ~ 'Beijing',
-    pop=='Bedouin' ~ 'HaDarom', # Negev (Southern Israel)
-    pop=='Druze' ~ 'HaZafon', # Carmel (Northern Israel)
-    pop=='Palestinian' ~ 'HaMerkaz', # Central Israel
-    pop=='Maya' ~ 'Campeche',
-    pop=='Pima' ~ 'Sonora'
-  ))
-
-oyo <- ne_states(country = 'nigeria', returnclass = 'sf') %>%
-  filter(name=='Oyo')
-utah <- ne_states(country = 'united states of america', returnclass = 'sf') %>%
-  filter(name=='Utah')
-beijing <- ne_states(country = 'china', returnclass = 'sf') %>%
-  filter(name=='Beijing')
-israel <- ne_states(country = 'israel', returnclass = 'sf') %>%
-  filter(name %in% c('HaDarom', 'HaZafon', 'HaMerkaz'))
-mexico <- ne_states(country = 'mexico', returnclass = 'sf') %>%
-  filter(name %in% c('Campeche', 'Sonora'))
-
-ref_state <- rbind(oyo, utah, beijing, israel, mexico) %>%
-  select(state = name, geometry) %>%
-  right_join(ref)
-ref_state <- st_coordinates(st_centroid(ref_state)) %>%
-  cbind(ref_state)
-
+# 1.5 prepare coordinates for reference samples
+ref <- fread('reference_composition.txt') %>%
+  rename_all(tolower) %>%
+  filter(used=='Yes', ancestry!='OCE')
+ref_coord <- fread('igsr_populations.tsv') %>%
+  filter(!grepl('Simons', `Data collections`)) %>%
+  transmute(data = case_when(`Data collections`=='Human Genome Diversity Project' ~ 'HGDP',
+                               T ~ '1KG'),
+            ancestry = case_when(`Superpopulation name` %in% c('Africa (HGDP)','African Ancestry') ~ 'AFR',
+                                 `Superpopulation name` %in% c('Europe (HGDP)','European Ancestry') ~ 'EUR',
+                                 `Superpopulation name` %in% c('East Asia (HGDP)','East Asian Ancestry') ~ 'EAS',
+                                 `Superpopulation name` %in% c('America (HGDP)','American Ancestry') ~ 'IAM',
+                                 `Superpopulation name`=='Middle East (HGDP)' ~ 'MEA',
+                                 T ~ NA),
+            population = case_when(data=='1KG' ~ `Population code`,
+                                   T ~ str_remove_all(`Population name`, ' ')),
+            latitude = `Population latitude`, longitude = `Population longitude`) %>%
+  drop_na()
+ref <- ref %>%
+  left_join(ref_coord) %>%
+  mutate(ancestry = factor(ancestry, levels = c('AFR','EUR','EAS','IAM','MEA')),
+         original = as.numeric(population %in% c('YRI','CEU','CHB','Maya','Pima',
+                                                 'Bedouin','Druze','Palestinian')))
+table(ref$ancestry)
+# AFR EUR EAS IAM MEA 
+#  12  13  23   5   4
 
 
 # 2. World map -----------------------------------------------------------------
@@ -242,7 +236,6 @@ french_guiana <- french_guiana %>% left_join(freq_anc)
 native_america <- native_america %>% left_join(freq_anc)
 NA_coord <- NA_coord %>% left_join(freq_anc)
 subregion_data <- subregion_data %>% left_join(freq_anc)
-
 
 # 2.2 visualize average GSPs
 my_gsp_map <- function(gsp, anc_label, color) {
@@ -265,30 +258,33 @@ maps$afr_map <- my_gsp_map('X1', expression(italic('P')^AFR~'(Sub-Saharan Africa
 maps$eur_map <- my_gsp_map('X2', expression(italic('P')^EUR~'(European)'), '#219ebc')
 maps$eas_map <- my_gsp_map('X3', expression(italic('P')^EAS~'(East Asian)'), '#a7c957')
 maps$iam_map <- my_gsp_map('X4', expression(italic('P')^IAM~'(Indigenous American)'), '#e76f51')
-maps$mea_map <- my_gsp_map('X5', expression(italic('P')^MEA~'(Middle Eastern)'), '#6a4c93')
 
-  
-# 2.3 location of HapMap3 & HGDP references
-maps$ref_map <- ggplot() +
-  geom_sf(data = subregion_data, fill = 'white') +
-  geom_point(data = ref_state, aes(x = X, y = Y, color = ancestry, size = n)) +
-  scale_color_manual(name = 'Reference\npopulation', drop = F, 
-                     values = c(`Sub-Saharan African`='#ffc300', `European`='#219ebc',
-                                `East Asian`='#a7c957', `Indigenous American`='#e76f51',
-                                `Middle Eastern`='#6a4c93'),
-                     labels = c(`Sub-Saharan African`='Yoruba in Nigeria',
-                                `European`='Northern & Western European in Utah',
-                                `East Asian`='Han Chinese in Beijing', 
-                                `Indigenous American`='Pima & Mayan in Mexico',
-                                `Middle Eastern`='Palestinian, Bedouin, & Druze, in Israel')) +
-  scale_size_continuous(name = 'Sample size', breaks = c(25, 50, 100)) +
+
+# 2.3 create a map displaying the location of reference samples
+ref_map <- gisco_get_countries() %>%
+  filter(ISO3_CODE!='ATA') %>%
+  ggplot() +
+  geom_sf(fill = 'white') +
+  geom_point(data = ref %>% 
+               mutate(shape = factor(ancestry=='MEA')), 
+             aes(x = longitude, y = latitude, color = ancestry, shape = shape, size = n)) +
+  geom_point(data = ref %>% 
+               filter(original==1 & ancestry!='MEA'), 
+             aes(x = longitude, y = latitude, size = n), shape = 1, show.legend = F, stroke = 1.5) +
+  geom_point(data = ref %>% 
+               filter(original==1 & ancestry=='MEA'), 
+             aes(x = longitude, y = latitude, size = n), shape = 2, show.legend = F, stroke = 1.5) +
+  scale_color_manual(name = 'Reference population', drop = F, 
+                     values = c('#ffc300', '#219ebc', '#a7c957', '#e76f51', '#6a4c93'),
+                     labels = c(expression(italic(P)^AFR),
+                                expression(italic(P)^EUR),
+                                expression(italic(P)^EAS), 
+                                expression(italic(P)^IAM),
+                                expression(italic(P)^MEA))) +
+  scale_size_continuous(name = 'Sample size') +
   theme_void() +
   theme(legend.position = 'bottom', legend.box = 'vertical') +
-  guides(color = guide_legend(nrow=2,order=2), size = guide_legend(order=1))
-maps$ref_map <- plot_grid(maps$ref_map + theme(legend.position = 'none'), 
-                          ggdraw(get_plot_component(maps$ref_map,'guide-box-bottom',T)),
-                          ncol = 1, rel_heights = c(5,1))
-
+  guides(shape = 'none')
 
 # 2.4 sample coverage
 subregion_levels <- c('fake - Sub-Saharan Africa', 'Sub-Saharan Africa', paste('PH1',1:4), 
@@ -317,7 +313,7 @@ col <- c(NA, '#ec9f05', rep(NA,4), NA, '#911eb4', '#ea638c', '#fabed4', '#b8b8ff
          '#dcbeff', NA, '#023e8a', '#0096c7', rep(NA,3), NA, '#00b4d8', '#90e0ef', 
          '#03045e', '#faf0ca', NA, NA, '#43aa8b', '#80ed99', '#a7c957', '#ecf39e', '#83c5be')
 
-maps$subregion_map <- ggplot() +
+subregion_map <- ggplot() +
   geom_sf(data = world_data, aes(fill = factor(subregion, levels = subregion_levels),
                                  color = factor(subregion, levels = subregion_levels))) +
   geom_sf(data = world_data, fill = NA) +
@@ -341,7 +337,10 @@ maps$subregion_map <- ggplot() +
 
 
 # 3. Export --------------------------------------------------------------------
-ggsave('figures/figure1.pdf', width = 16, height = 15,
-       plot_grid(maps$afr_map, maps$eur_map, maps$eas_map, maps$iam_map, maps$mea_map, maps$ref_map, ncol = 2, nrow = 3))
-ggsave('figures/appendix_figure1.pdf', maps$subregion_map, width = 16, height = 12)
+ggsave(paste0('figures/figure1',fig_format), width = 16, height = 12,
+       plot_grid(maps$afr_map, maps$eur_map, maps$eas_map, maps$iam_map, ncol = 2))
+
+ggsave(paste0('figures/appendix_region_map',fig_format), subregion_map, width = 16, height = 12)
+
+ggsave(paste0('figures/appendix_ref_location',fig_format), ref_map, width = 16, height = 12)
 

@@ -2,6 +2,7 @@ library(here); library(tidyverse); library(bigsnpr); library(data.table)
 library(rhdf5)
 
 setwd(str_remove(here(), '/scripts'))
+source('scripts/00-functions.R')
 
 theme_custom <- function() {
   theme_classic() %+replace%
@@ -14,40 +15,20 @@ theme_custom <- function() {
                                     margin=margin(0,0,5.5,0)))
 }
 
-# read in 5 PCs
-ah_PCs <- readRDS('ah_projected_PC5.rds')
+fig_format <- '.pdf'
 
-# read in supervised ADMIXTURE 5
-ah_s5 <- readRDS('all_data.rds')$s5
+# read in PCs
+ah_PCs <- readRDS('ah_projected_PC4.rds')
 
-# merge into one dataset
-ah <- ah_PCs %>%
+# read in supervised 4
+ah_s4 <- readRDS('all_data.rds')$s4
+
+d <- ah_PCs %>%
   mutate(across(c(FID,IID), function(x) x = as.character(x))) %>% 
-  left_join(ah_s5)
+  left_join(ah_s4) %>%
+  filter(region3!='USA & Canada') %>%
+  rename(color = region3)
 
-# standardize PCs based on weighted means and SDs
-mean <- sd <- list()
-for (i in 1:5) {
-  l <- paste0('PC',i)
-  td <- ah %>% filter(!is.na(ipwgt)) # 7884 left -- 2090 missing, majority due to missing racec (N = 1614)
-  mean[[l]] <- weighted.mean(td[[l]], td$ipwgt)
-  sd[[l]] <- sqrt(sum((td[[l]] - mean[[l]])^2*td$ipwgt)/(sum(td$ipwgt)-1))
-  ah[[l]] <- (ah[[l]] - mean[[l]])/sd[[l]]
-}
-
-# d <- ah %>%
-#   filter(include_ssa==1) %>%
-#   mutate(region = 'Sub-Saharan Africa') %>%
-#   rbind(ah %>%
-#           filter(include_america==1) %>%
-#           mutate(region = 'The Americas')) %>%
-#   rbind(ah %>%
-#           filter(include_europe==1) %>%
-#           mutate(region = 'Europe')) %>%
-#   rename(color = region)
-d <- ah %>% rename(color = region3)
-
-# define a function for comparing one GSP and one PC
 my_compare_PCX <- function(data, x_label, y_label, color_label, base_color) {
   data <- data %>% filter(!is.na(color), y>=0.01)
   n_rho <- data %>%
@@ -60,7 +41,8 @@ my_compare_PCX <- function(data, x_label, y_label, color_label, base_color) {
   scatter <- data %>%
     ggplot(aes(x = x, y = y, color = group)) + 
     geom_point(shape = 1, size = 2, stroke = 1) +
-    geom_text(data = n_rho, aes(x = -Inf, y = y, label = text), parse = T, hjust = -0.2, show.legend = F) +
+    geom_text(data = n_rho, aes(x = Inf, y = y, label = text), parse = T,
+              hjust = 1.2, show.legend = F) +
     scale_x_continuous(name = x_label, expand = c(0,0)) +
     scale_y_continuous(name = y_label, limits = c(0,1), expand = c(0,0)) +
     scale_color_manual(color_label, values = c(base_color, 'black')) +
@@ -94,5 +76,6 @@ p3 <- my_compare_PCX(d %>% rename(x = PC1, y = X1) %>%
                        filter(color=='The Americas') %>%
                        mutate(group = X4>=0.05),
                      'PC1', expression(italic(P)^AFR), expression(italic(P)^IAM>=0.05), '#dd0426')
-ggsave('figures/appendix_figure6.pdf', plot_grid(p1,p2,p3, nrow = 2), width = 10, height = 10) 
+ggsave(paste0('figures/appendix_gsp_robust_pca',fig_format), plot_grid(p1,p2,p3, nrow = 2),
+       width = 10, height = 10)
 

@@ -1,5 +1,7 @@
 # 0. Init & import data --------------------------------------------------------
-library(here); library(haven); library(readxl); library(tidyverse); library(caret)
+library(here); library(haven); library(readxl)
+library(tidyverse)
+library(caret)
 library(kableExtra); library(modelsummary); library(gtsummary); library(htmlTable)
 
 setwd(str_remove(here(), '/scripts'))
@@ -13,13 +15,13 @@ region_label <- c('Sub-Saharan Africa', 'Europe', 'Eastern Asia & Oceania',
                        'Middle East & Southern Asia', 'The Americas', 'USA & Canada')
 
 # read in Add Health survey and linkage data
-wave1 <- read_dta('addhealth/wave1.dta')
-wave3 <- read_dta('addhealth/wave3.dta')
-wave5 <- read_dta('addhealth/wave5.dta')
-link <- read_dta('addhealth/GID_link.dta')
+wave1 <- read_xpt('allwave1.xpt') %>% rename_all(tolower)
+wave3 <- read_xpt('wave3.xpt') %>% rename_all(tolower)
+wave5 <- read_xpt('wave5.xpt') %>% rename_all(tolower)
+link <- read_xpt('GID_link.xpt') %>% rename_all(tolower)
 
 # read in prepared codebook and metadata
-recode <- read_excel('addhealth/geoanc_codebook.xlsx', na = '.') %>%
+recode <- read_excel('geoanc_codebook.xlsx', na = '.') %>%
   transmute(value = value, country = factor(harmonized), 
             subregion = factor(subregion, levels = subregion_label))
 meta <- read_excel('multilevel_regions.xlsx') %>%
@@ -35,6 +37,7 @@ country_label <- levels(recode$country)
 merged <- link %>% 
   left_join(wave3 %>% select(aid, matches('h3od7'), h3od8), by = 'aid') %>%
   mutate_at(vars(matches('h3od7'), 'h3od8'), ~ ifelse(.>=990|.==203, NA, .))
+
 v <- c('a', 'b', 'c', 'd')
 for (i in (1:4)) {
   t <- v[[i]]
@@ -53,7 +56,7 @@ all <- merged %>%
     # single ancestral country reported
     single_anc = case_when(
       h3od7b==0 ~ 1,
-      is.na(h3od7b) | is.na(h3od7a) ~ NA,
+      is.na(h3od7b) | is.na(h3od7a) ~ NA, # same with or without is.na(h3od7a)
       T ~ 0
     ),
     # best geographic ancestry
@@ -69,8 +72,10 @@ all <- merged %>%
       is.na(country) & !is.na(country_a) & single_anc==1 ~ country_a,
       T ~ country
     ),
-    across(starts_with('subregion_'), ~ case_when(. %in% c('No other country', 'America', 'Canada', 'Other') ~ NA, T ~ .)),
-    across(starts_with('country_'), ~ case_when(. %in% c('No other country', 'America', 'Canada', 'Other') ~ NA, T ~ .)),
+    across(starts_with('subregion_'), 
+           ~ case_when(. %in% c('No other country', 'America', 'Canada', 'Other') ~ NA, T ~ .)),
+    across(starts_with('country_'), 
+           ~ case_when(. %in% c('No other country', 'America', 'Canada', 'Other') ~ NA, T ~ .)),
     # reported countries in SSA as one of geographic ancestries
     include_ssa = ifelse(subregion_a=='Sub-Saharan Africa' | subregion_b=='Sub-Saharan Africa' |
                            subregion_c=='Sub-Saharan Africa' | subregion_d=='Sub-Saharan Africa', 1, NA),
@@ -149,7 +154,7 @@ ancestry_recode_USCA <- function(var) {
     ungroup() %>%
     # whether reported US/Canada only or US/Canada & Other
     mutate(Other = 0, no_other_anc = `NA`==4) %>%
-    # create weights for reported ancestral groups, excluding "Other"
+    # create weights for reported ancestry groups, excluding "Other"
     mutate(sum = rowSums(.[3:(length(.)-1)])) %>%
     mutate(across(3:(length(.)-2), ~ ifelse(no_other_anc, 0, ./sum))) %>%
     left_join(all) %>%
@@ -378,7 +383,7 @@ all_dum2 <- all_dum %>%
   filter(!is.na(subregion), `SUBREG America`+`SUBREG Canada`==0) %>%
   mutate(`CNTR Unknown Central America` = 0) %>%
   rbind(all_na %>% select(all_of(names(all_dum)), 'CNTR Unknown Central America')) %>%
-  # merge in region-level information
+  # merge in region-level variables
   left_join(meta) %>%
   left_join(meta %>% rename(region2 = region, subregion2 = subregion))
 
@@ -421,10 +426,6 @@ all_reg <- all_dum2 %>%
     )
   )
 
-table(all_reg$region3, useNA = 'ifany')
-# Sub-Saharan Africa       The Americas       USA & Canada               <NA> 
-#                  4                 27                988               1065 
-
 
 # 1.5 create the final geographic ancestry data
 all_final <- all_dum2 %>%
@@ -450,37 +451,13 @@ all_final <- all_dum2 %>%
                 ~ case_when(`REGION The Americas`==0 & region3=='The Americas' ~ NA, T ~ .)),
          across(paste0('REGION ',region_label[1:4]), 
                 ~ case_when(`REGION The Americas`==0 & region3=='The Americas' ~ 0, T ~ .)),
-         `REGION The Americas` = case_when(`REGION The Americas`==0 & region3=='The Americas' ~ 1, 
-                                           T ~ `REGION The Americas`))
-
-table(all_final$country, useNA = 'ifany')
-# 2728 America & 34 Canada & 6 Other & 1783 NAs
-
-table(all_final$country2, useNA = 'ifany')
-# 1276 America & 23 Canada & 6 Other & 1086 NAs
-
-table(all_final$subregion, useNA = 'ifany')
-# 2728 America & 34 Canada & 6 Other & 1783 NAs
-
-table(all_final$subregion2, useNA = 'ifany')
-# 1220 America & 20 Canada & 6 Other & 1084 NAs
-
-table(all_final$region2, useNA = 'ifany')
-# Sub-Saharan Africa                      Europe      Eastern Asia & Oceania 
-#               1930                        3975                         516 
-# Middle East & Southern Asia                The Americas                USA & Canada 
-#                          85                        1384                         998 
-# <NA> 
-# 1086 
-
-table(all_final$region3, useNA = 'ifany')
-# Sub-Saharan Africa                      Europe      Eastern Asia & Oceania 
-#               1934                        3975                         516 
-# Middle East & Southern Asia                The Americas                USA & Canada 
-#                          85                        1411                         988 
-# <NA> 
-# 1065 
-# 7921 valid
+         `REGION The Americas` = case_when(`REGION The Americas`==0 & region3=='The Americas' ~ 1,
+                                             T ~ `REGION The Americas`)) %>%
+  # combine West Asia and North Africa and rename to Middle East
+  mutate(subregion = case_when(subregion %in% c('North Africa', 'West Asia') ~ 'Middle East', T ~ subregion),
+         subregion2 = case_when(subregion2 %in% c('North Africa', 'West Asia') ~ 'Middle East', T ~ subregion2),
+         `SUBREG Middle East` = `SUBREG West Asia` + `SUBREG North Africa`) %>%
+  select(-c(`SUBREG West Asia`, `SUBREG North Africa`))
 
 all_final %>% select(starts_with('SUBREG '), -paste0('SUBREG ',c('America','Canada','Other'))) %>%
   drop_na() %>% sum() # 8055
@@ -489,22 +466,17 @@ all_final %>% select(starts_with('REGION ')) %>% drop_na() %>% sum() # 8056
 
 
 # 2. Export --------------------------------------------------------------------
-all_final %>% 
-  select(aid, region, subregion, country, region2, subregion2, country2,
-         region3, starts_with('REGION '), starts_with('SUBREG '),
-         starts_with('CNTR '), starts_with('include_')) %>%
-  #  combining West Asia and North Africa and rename to Middle East
-  mutate(subregion = case_when(subregion %in% c('North Africa', 'West Asia') ~ 'Middle East', T ~ subregion),
-         subregion2 = case_when(subregion2 %in% c('North Africa', 'West Asia') ~ 'Middle East', T ~ subregion2),
-         `SUBREG Middle East` = `SUBREG West Asia` + `SUBREG North Africa`) %>%
-  select(-c(`SUBREG West Asia`, `SUBREG North Africa`)) %>% 
-  saveRDS('addhealth/family_origin_dum.rds')
+saveRDS(all_final %>% select(aid, region, subregion, country, region2, subregion2,
+                             country2, region3, single_anc, starts_with('REGION '),
+                             starts_with('SUBREG '), starts_with('CNTR '), starts_with('include_')),
+        'family_origin_final.rds')
 
+# export region meta data
 meta %>%
   left_join(recode %>% 
               select(-value) %>%
               rbind(data.frame(subregion = 'Central America', country = 'Unknown Central America')) %>%
               unique()) %>%
   mutate(subregion = case_when(subregion %in% c('North Africa', 'West Asia') ~ 'Middle East', T ~ subregion)) %>%
-  saveRDS('region_meta.rds')
+  saveRDS('region_meta_final.rds')
 

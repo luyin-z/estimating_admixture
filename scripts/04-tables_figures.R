@@ -1,43 +1,58 @@
 # 0. Init ----------------------------------------------------------------------
-library(here); library(tidyverse); library(modelsummary); library(survey)
-library(gtsummary); library(flextable); library(riverplot); library(grDevices)
-library(estimatr); library(caret); library(fixest); library(lmtest); library(sandwich)
-library(marginaleffects); library(margins); library(scales); library(ftExtra)
-library(ggh4x); library(lme4)
+library(here); library(haven)
+library(tidyverse); library(survey); library(scales)
+library(estimatr); library(caret); library(fixest); library(lme4)
+library(lmtest); library(sandwich); library(marginaleffects)
+library(modelsummary); library(gtsummary); library(flextable); library(riverplot)
+library(grDevices); library(ftExtra); library(ggh4x); library(ggtern)
 
 setwd(str_remove(here(), '/scripts'))
 
 region_label <- c('Europe', 'The Americas', 'Sub-Saharan Africa', 'Eastern Asia & Oceania',
-                  'Middle East & South Asia')
-ancestry_label <- c('Sub−Saharan African', 'European', 'East Asian', 'Indigenous American', 'Middle Eastern')
-ancestry_label2 <- c('AFR', 'EUR', 'EAS', 'IAM', 'MEA')
+                       'Middle East & South Asia')
+ancestry_label <- c('Sub−Saharan African', 'European', 'East Asian', 'Indigenous American')
+ancestry_label2 <- c('AFR', 'EUR', 'EAS', 'IAM')
 
 source('scripts/00-functions.R')
+
 set_gtsummary_theme(list('style_number-arg:big.mark' = ''))
+fig_format <- '.pdf'
 
 
 
 # 1. Import data ---------------------------------------------------------------
 all <- readRDS('all_data.rds')
-all_stats <- readRDS('all_stats.rds')
-gnomix_s5 <- readRDS('dp_gsp.rds')
+se <- readRDS('supervised_k45_se_output.rds')
+pheno <- readRDS('all_pheno.rds')
+fam_origin <- readRDS('family_origin_final.rds')
+meta <- readRDS('region_meta_final.rds')
+best_race <- readRDS('best_race.rds') # from another project
 
 
 
 # 2. Tables --------------------------------------------------------------------
 # 2.1 Table 1 (main text): descriptive statistics
 # left panel of table 1: unweighted
-left <- all$s5 %>%
-  select(sex, byear, edu, racec, strataid, region, skin, fam_ses, nhood_ses) %>%
+d <- all$s4 %>%
+  mutate(has_reg = 1-as.numeric(is.na(region3)),
+         has_subreg = 1-as.numeric(is.na(subregion2)),
+         has_reg = case_when(region3=='USA & Canada' ~ 0, T ~ has_reg),
+         has_subreg = case_when(subregion2 %in% c('America','Canada','Other') ~ 0, T ~ has_subreg))
+
+left <- d %>%
+  select(sex, byear, edu, racec, strataid, has_reg, has_subreg, region, skin, fam_ses, nhood_ses) %>%
   tbl_summary(  
     statistic = list(all_continuous() ~ '{mean}-{sd}',
                      all_categorical() ~ '{p}%- '),
     digits = everything() ~ 2,
+    # type = list(all_categorical() ~ 'categorical'),
     label = list(sex ~ 'Gender',
                  byear ~ 'Birth year',
                  edu ~ 'Educational attainment',
                  racec ~ 'Race & enthnicity',
                  strataid ~ 'High school census region',
+                 has_reg ~ 'Has ancestral region data',
+                 has_subreg ~ 'Has ancestral sub-region data',
                  region ~ 'Best ancestry',
                  skin ~ 'Skin tone',
                  fam_ses ~ 'W1 social origins score',
@@ -52,8 +67,18 @@ left <- all$s5 %>%
   # modify header
   modify_header(stat_0 ~ '**Mean (SD) / %**')
 
+# add statistics for region/subregion data availability
+n1 <- d %>% select(starts_with('reg ')) %>% sum(na.rm = T)
+n2 <- d %>% select(starts_with('SUBREG '), -paste0('SUBREG ',c('America','Canada','Other'))) %>% sum(na.rm = T)
+left_new <- left$table_body %>%
+  filter(variable %in% c('has_reg', 'has_subreg')) %>%
+  mutate(
+    stat_0 = ifelse(variable=='has_reg', n1, n2),
+    stat_0 = paste0(sprintf('%.2f', stat_0/as.numeric(n)*100), '%- ')
+  )
+
 # add statistics for the fractional version of geographic ancestry
-left_add <- all$s5 %>%
+left_add <- d %>%
   select(starts_with('REGION ')) %>%
   drop_na() %>%
   mutate(n = sum(rowSums(.)),
@@ -71,28 +96,18 @@ left_add <- all$s5 %>%
           row_type = 'label', label = var_label, stat_0 = NA, n = unique(.$n)) %>%
   mutate(n = ifelse(row_type=='label', n, NA))
 
-# add statistics for region/subregion data availability
-n1 <- all$s5 %>% select(starts_with('REGION ')) %>% sum(na.rm = T)
-n2 <- all$s5 %>% select(starts_with('SUBREG '), -paste0('SUBREG ',c('America','Canada','Other'))) %>% sum(na.rm = T)
-left_add2 <- data.frame(variable = c('has_reg', 'has_subreg'), row_type = 'label',
-                       label = c('Has ancestral region data', 'Has ancestral sub-region data'),
-                       n = 9974, var_type = 'continuous',
-                       stat_0 = c(n1, n2)) %>%
-  mutate(var_label = label,
-         stat_0 = paste0(sprintf('%.2f', stat_0/as.numeric(n)*100), '%- '))
-
 # complete left panel
 left_all <- left %>%
   modify_table_body(
     ~.x %>% 
-      filter(!(variable %in% c('skin','fam_ses','nhood_ses'))) %>%
+      filter(!(variable %in% c('skin','fam_ses','nhood_ses','has_reg','has_subreg'))) %>%
       rbind(left_add[c(6,1:5),]) %>%
-      rbind(left_add2) %>%
+      rbind(left_new) %>%
       rbind(.x %>% filter(variable %in% c('skin','fam_ses','nhood_ses')))
   )
 
 # right panel of table 1: weighted
-right <- svydesign(data = all$s5 %>% filter(!is.na(clusterid), !is.na(strataid), !is.na(ipwgt)),
+right <- svydesign(data = d %>% filter(!is.na(clusterid), !is.na(strataid), !is.na(ipwgt)),
                    id = ~ clusterid, strata = ~ strataid, weights = ~ ipwgt) %>%
   tbl_svysummary(     
     statistic = list(all_continuous() ~ '{mean}-{sd}',       
@@ -104,26 +119,49 @@ right <- svydesign(data = all$s5 %>% filter(!is.na(clusterid), !is.na(strataid),
                  edu ~ 'Educational attainment',
                  racec ~ 'Race & enthnicity',
                  strataid ~ 'High school census region',
+                 has_reg ~ 'Has ancestral region data',
+                 has_subreg ~ 'Has ancestral sub-region data',
                  region ~ 'Best ancestry',
                  skin ~ 'Skin tone',
                  fam_ses ~ 'W1 social origins score',
                  nhood_ses ~ 'W1 neighborhood disadvantage'),
-    include = c(sex, byear, edu, racec, strataid, region, skin, fam_ses, nhood_ses)
+    include = c(sex, byear, edu, racec, strataid, has_reg, has_subreg, region, skin, fam_ses, nhood_ses)
   ) %>%
+  # do not show missingness rows
   remove_row_type(type = 'missing') %>%
+  # add sample sizes
   add_n() %>%
+  # remove footnote
   modify_footnote(c(all_stat_cols()) ~ NA) %>%
+  # modify header
   modify_header(stat_0 ~ '**Mean (SD) / %**')
 
+# add statistics for region/subregion data availability
+n1 <- d %>% 
+  mutate(across(starts_with('REGION '), function(x) x = ipwgt*x)) %>%
+  select(starts_with('REGION ')) %>% 
+  sum(na.rm = T)
+n2 <- d %>% 
+  mutate(across(starts_with('SUBREG '), function(x) x = ipwgt*x)) %>% 
+  select(starts_with('SUBREG '), -paste0('SUBREG ',c('America','Canada','Other'))) %>% 
+  sum(na.rm = T)
+right_new <- right$table_body %>%
+  filter(variable %in% c('has_reg', 'has_subreg'), row_type=='label') %>%
+  mutate(
+    stat_0 = ifelse(variable=='has_reg', n1, n2),
+    stat_0 = paste0(sprintf('%.2f', stat_0/as.numeric(n)*100), '%- '),
+    var_type = 'dichotomous'
+  )
+
 # add statistics for the fractional version of geographic ancestry
-right_svy <- svydesign(data = all$s5 %>%
+right_svy <- svydesign(data = d %>%
                          mutate(n = 1) %>%
                          filter(!is.na(clusterid), !is.na(strataid), !is.na(ipwgt)),
                        id = ~ clusterid, strata = ~ strataid, weights = ~ ipwgt)
 
 result <- list()
-for (reg in all$s5 %>% select(starts_with('REGION ')) %>% names()) {
-  result[[reg]] <- svytotal(as.formula(paste0('~`', reg, '`')), na.rm = T, design = right_svy)[[1]]
+for (reg in d %>% select(starts_with('REGION ')) %>% names()) {
+  result[[reg]] <- svytotal(as.formula(paste0('~`', reg, '`')), na.rm = TRUE, design = right_svy)[[1]]
 }
 
 right_add <- result %>%
@@ -141,31 +179,17 @@ right_add <- result %>%
           row_type = 'label', label = var_label, stat_0 = NA, n = unique(.$n)) %>%
   mutate(n = ifelse(row_type=='label', n, NA))
 
-# add statistics for region/subregion data availability
-n1 <- all$s5 %>% 
-  mutate(across(starts_with('REGION '), function(x) x = ipwgt*x)) %>%
-  select(starts_with('REGION ')) %>% 
-  sum(na.rm = T)
-n2 <- all$s5 %>% 
-  mutate(across(starts_with('SUBREG '), function(x) x = ipwgt*x)) %>% 
-  select(starts_with('SUBREG '), -paste0('SUBREG ',c('America','Canada','Other'))) %>% 
-  sum(na.rm = T)
-wt_n <- svytotal(~n, design = right_svy)[[1]]
-right_add2 <- data.frame(variable = c('has_reg', 'has_subreg'), row_type = 'label',
-                         label = c('Has ancestral region data', 'Has ancestral sub-region data'),
-                         n = wt_n, var_type = 'continuous',
-                         stat_0 = c(n1, n2)) %>%
-  mutate(var_label = label,
-         stat_0 = paste0(sprintf('%.2f', stat_0/as.numeric(n)*100), '%- '))
-
 # complete right panel
-N <-  all$s5 %>% filter(!is.na(clusterid), !is.na(strataid), !is.na(ipwgt)) %>% nrow()
+wt_n <- svytotal(~n, design = right_svy)[[1]]
+## sample size with valid weights
+N <-  d %>% filter(!is.na(clusterid), !is.na(strataid), !is.na(ipwgt)) %>% nrow
+
 right_all <- right %>%
   modify_table_body(
     ~.x %>% 
-      filter(!(variable %in% c('skin','fam_ses','nhood_ses'))) %>%
+      filter(!(variable %in% c('skin','fam_ses','nhood_ses','has_reg','has_subreg'))) %>%
       rbind(right_add[c(6,1:5),]) %>%
-      rbind(right_add2) %>%
+      rbind(right_new) %>%
       rbind(.x %>% filter(variable %in% c('skin','fam_ses','nhood_ses'))) %>%
       # rescale sample size
       mutate(n = sprintf('%.0f', as.numeric(n)/wt_n*N),
@@ -187,122 +211,123 @@ tbl1 <- left_all %>%
 tbl1 %>% as_gt() %>% gt::gtsave(file = 'tables/table1.docx')
 
 
-# 2.2 Table 2 (main text): unsupervised & supervised K = 5 (the fraction version)
-d <- all$s5 %>%
-  select(aid, starts_with('REGION '), starts_with('SUBREG '), 
-         `s5_Sub−Saharan African` = X1, s5_European = X2, `s5_East Asian` = X3,
-         `s5_Indigenous American` = X4, `s5_Middle Eastern` = X5) %>%
-  left_join(all$us5 %>% select(aid, paste0('X',1:5)) %>% rename_with(~ paste0('us5_',.), paste0('X',1:5)))
+# 2.2 Table 2: supervised K = 4 (the fraction version)
+k4 <- all[c('us4', 's4')]
+colnames(k4$us4)[1:4] <- paste0('us4_', colnames(k4$us4)[1:4])
+colnames(k4$s4)[1:4] <- paste0('s4_', colnames(k4$s4)[1:4]) %>%
+  str_replace('X1', 'Sub−Saharan African') %>%
+  str_replace('X2', 'European') %>%
+  str_replace('X3', 'East Asian') %>%
+  str_replace('X4', 'Indigenous American')
+
+table_k4 <- k4$us4 %>%
+  select(aid, starts_with('REGION '), starts_with('SUBREG '), starts_with('us4_')) %>%
+  left_join(k4$s4 %>% select(aid, starts_with('s4_')))
+
+# unsupervised and supervised GSP summary statistics
+upper <- summarytable2(table_k4, paste0('us4_X', 1:4))
+lower <- summarytable2(table_k4, paste0('s4_', ancestry_label))
 
 # reliability
-reliability <- all_stats %>%
-  filter(admixture %in% c('us5','s5')) %>%
-  gather('key', 'value', starts_with('X')) %>%
-  separate('key' , c('X', 'stats'), '_') %>%
-  spread('stats', 'value') %>%
-  group_by(admixture, X) %>%
+reliability <- se$s4 %>%
+  mutate(stats = 'se') %>%
+  rbind(all$s4 %>% 
+          select(FID, IID, paste0('X',1:4)) %>%
+          mutate(stats = 'b')) %>%
+  gather(X, value, paste0('X',1:4)) %>%
+  spread(stats, value) %>%
+  group_by(X) %>%
   summarise(
     mean_b = mean(b), tss_b = sum((b-mean_b)^2), sum_var = sum(se^2),
     rel = 1-sum_var/tss_b
   ) %>%
   ungroup() %>%
-  drop_na() %>%
-  select(admixture, X, rel) %>%
-  spread('X', 'rel') %>%
-  mutate(across(X1:X5, ~ sprintf('%.3f',.)))
+  select(X, rel) %>%
+  spread(X, rel) %>%
+  mutate(across(X1:X4, ~ sprintf('%.3f',.)))
 
 # correlation
-cor <- d %>%
-  select(starts_with('us5'), starts_with('s5')) %>%
-  mutate(X1 = sprintf('%.3f', cor(us5_X1, `s5_Sub−Saharan African`)),
-         X2 = sprintf('%.3f', cor(us5_X2, `s5_European`)),
-         X3 = sprintf('%.3f', cor(us5_X3, `s5_East Asian`)),
-         X4 = sprintf('%.3f', cor(us5_X4, `s5_Indigenous American`)),
-         X5 = sprintf('%.3f', cor(us5_X5, `s5_Middle Eastern`))
-  ) %>% 
-  select(X1:X5) %>%
+cor_k4 <- table_k4 %>%
+  select(starts_with('us4'), starts_with('s4')) %>%
+  mutate(X1 = sprintf('%.3f', cor(us4_X1, `s4_Sub−Saharan African`)),
+         X2 = sprintf('%.3f', cor(us4_X2, `s4_European`)),
+         X3 = sprintf('%.3f', cor(us4_X3, `s4_East Asian`)),
+         X4 = sprintf('%.3f', cor(us4_X4, `s4_Indigenous American`))) %>% 
+  select(X1:X4) %>%
   unique()
 
-# Table 6 (appendix): unsupervised ADMIXTURE K = 5
-raw <- summarytable2(d, paste0('us5_X', 1:5))
-tbl_s6 <- raw %>%
+# make panelA: unsupervised 4
+panelA <- upper %>%
   mutate(Region = case_when(Subregion=='Total' ~ Region, T ~ ''),
          `N = 8055` = paste0(sprintf('%.0f',`N = 8055`), ' (',
                              sprintf('%.0f', prop*100), '%)')) %>%
-  rename_with(function(x) x = str_replace(x, 'us5', 'Unsupervised 5'), starts_with('us5')) %>%
+  rename_with(function(x) x = str_replace(x, 'us4', 'Unsupervised 4'), starts_with('us4')) %>%
   select(-prop) %>%
-  rbind(reliability %>% filter(admixture=='us5') %>%
-          transmute(Region = 'Reliability', Subregion = '', `N = 8055` = '', X1, X2, X3, X4, X5) %>%
-          rename_with(function(x) x = paste0('Unsupervised 5_', x), X1:X5)) %>%
   rename(`Sub-Region` = Subregion) %>%
   flextable() %>%
   split_header() %>%
   merge_h(part = 'header') %>%
-  set_header_labels(values = c(rep('',3), '*P*^1^','*P*^2^','*P*^3^','*P*^4^','*P*^5^')) %>%
+  set_header_labels(values = c(rep('',3), '*P*^1^','*P*^2^','*P*^3^','*P*^4^')) %>%
   align(align = 'center', part = 'header') %>%
   colformat_md(part = 'header') %>%
-  merge_at(i = nrow(raw)+1, j = 1:2) %>%
-  align(i = nrow(raw)+1, j = 1, align = 'center') %>%
-  align(j = 4:8, align = 'center') %>%
-  bold(i = nrow(raw)+1, j = 1) %>%
+  align(j = 4:7, align = 'center') %>%
   autofit()
 
-# Table 2 (main text): supervised ADMIXTURE K = 5
-raw <- summarytable2(d, paste0('s5_', ancestry_label))
-tbl2_upper <- raw %>%
-  mutate(Region = case_when(Subregion=='Total' ~ Subregion, T ~ ''),
+# make panelB: supervised 4 + reliability
+panelB <- lower %>%
+  mutate(Region = case_when(Subregion=='Total' ~ Region, T ~ ''),
          `N = 8055` = paste0(sprintf('%.0f',`N = 8055`), ' (',
                              sprintf('%.0f', prop*100), '%)')) %>%
-  rename_with(function(x) x = str_remove(x, 's5_'), starts_with('s5_')) %>%
+  rename_with(function(x) x = str_remove(x, 's4_'), starts_with('s4_')) %>%
   select(-prop) %>%
-  rbind(reliability %>% filter(admixture=='s5') %>%
+  rbind(reliability %>%
           transmute(Region = 'Reliability', Subregion = '', `N = 8055` = '', 
                     `Sub−Saharan African` = X1, `European` = X2, `East Asian` = X3,
-                    `Indigenous American` = X4, `Middle Eastern` = X5)) %>%
+                    `Indigenous American` = X4)) %>%
   rename(`Sub-Region` = Subregion) %>%
   flextable() %>%
-  add_header_row(values = c('','*P*^AFR^','*P*^EUR^','*P*^EAS^','*P*^IAM^','*P*^MEA^'),
-                 colwidths = c(3,rep(1,5))) %>%
-  add_header_row(values = c('', 'Supervised 5'), colwidths = c(3,5)) %>%
+  add_header_row(values = c('','*P*^AFR^','*P*^EUR^','*P*^EAS^','*P*^IAM^'),
+                 colwidths = c(3,rep(1,4))) %>%
+  add_header_row(values = c('', 'Supervised 4'), colwidths = c(3,4)) %>%
   align(align = 'center', part = 'header') %>%
   colformat_md(part = 'header') %>%
-  merge_at(i = nrow(raw)+1, j = 1:2) %>%
-  align(i = nrow(raw)+1, j = 1, align = 'center') %>%
-  align(j = 4:8, align = 'center') %>%
-  bold(i = nrow(raw)+1, j = 1) %>%
+  merge_at(i = nrow(lower)+1, j = 1:2) %>%
+  align(i = nrow(lower)+1, j = 1, align = 'center') %>%
+  align(j = 4:7, align = 'center') %>%
+  bold(i = nrow(lower)+1, j = 1) %>%
   autofit()
 
-tbl2_lower <- cor %>%
+# make panelC: correlation
+panelC <- cor_k4 %>%
   transmute(` ` = '', `  ` = '', `   ` = '', 
             `Correlation_X1 - Sub−Saharan African`  = X1, `Correlation_X2 - European` = X2,
-            `Correlation_X3 - East Asian` = X3, `Correlation_X4 - Indigenous American` = X4,
-            `Correlation_X5 - Middle Eastern` = X5) %>%
+            `Correlation_X3 - East Asian` = X3, `Correlation_X4 - Indigenous American` = X4) %>%
   flextable() %>%
   set_header_labels(values = c('','','','*P*^1^,*P*^AFR^','*P*^2^,*P*^EUR^','*P*^3^,*P*^EAS^',
-                               '*P*^4^,*P*^IAM^','*P*^5^,*P*^MEA^')) %>%
-  add_header_row(values = c('', 'Unsupervised-Supervised Correlation'), colwidths = c(3,5)) %>%
+                               '*P*^4^,*P*^IAM^')) %>%
+  add_header_row(values = c('', 'Unsupervised-Supervised Correlation'), colwidths = c(3,4)) %>%
   align(align = 'center', part = 'header') %>%
   colformat_md(part = 'header') %>%
-  align(j = 4:8, align = 'center') %>%
+  align(j = 4:7, align = 'center') %>%
   autofit()
 
-save_as_docx(tbl2_upper, tbl2_lower, path = 'tables/table2.docx')
-save_as_docx(tbl_s6, path = 'tables/appendix_table6.docx')
+save_as_docx(panelB, panelC, path = 'tables/table2.docx')
+save_as_docx(panelA, path = 'tables/appendix_unadx4_tbl.docx')
 
 
 # 2.3 Table 3 (main text): regression table for skin tone
 # prepare data
-d <- all$s5 %>% 
-  mutate(region = factor(region3),
-         # continuous skin tone
+d <- all$s4 %>% 
+  mutate(region = region3 %>% factor(),
          skin = 6 - as.numeric(skin),
-         # binary skin tone
          darkbrown = as.numeric(skin>=4),
          lightbrown = as.numeric(skin>=2),
          skin2 = case_when(region %in% c('The Americas', 'Europe') ~ lightbrown,
                            region=='Sub-Saharan Africa' ~ darkbrown, T ~ NA),
          female = as.numeric(sex=='Female'),
-         across(paste0('X',1:5), ~ .*10))
+         across(paste0('X',1:4), ~ .*10),
+         ga_comb = paste(include_europe, include_america, include_ssa, include_eao,
+                         include_mesa, sep = ''))
 
 # create a variable for ancestral country fixed effects
 d <- d %>%
@@ -320,19 +345,22 @@ d <- d %>%
   rbind(d %>%
           filter(include_america==1) %>%
           mutate(region = 'The Americas')) %>%
-  mutate(skin2 = case_when(region=='The Americas' ~ lightbrown,
+  rbind(d %>%
+          filter(include_europe==1) %>%
+          mutate(region = 'Europe')) %>%
+  mutate(skin2 = case_when(region %in% c('The Americas', 'Europe') ~ lightbrown,
                            region=='Sub-Saharan Africa' ~ darkbrown, T ~ NA))
 
-exp1 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4 + X5'
-exp2 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4 + X5 + fam_ses + nhood_ses'
-exp3 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4 + X5 + fam_ses + nhood_ses | intid3'
-exp4 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4 + X5 + fam_ses + nhood_ses | intid3 + cga_comb'
+exp1 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4'
+exp2 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4 + fam_ses + nhood_ses'
+exp3 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4 + fam_ses + nhood_ses | intid3'
+exp4 <- 'skin ~ female + age3 + I(age3^2) + X1 + X3 + X4 + fam_ses + nhood_ses | intid3 + cga_comb'
 
 # OLS regression
 reg <- lapply(c('Sub-Saharan Africa','The Americas'), function(ga) {
   list(
-    lm(exp1, d %>% filter(region==ga)),
-    lm(exp2, d %>% filter(region==ga)),
+    lm(exp1, d %>% filter(region==ga)), 
+    lm(exp2, d %>% filter(region==ga)), 
     feols(as.formula(exp3), 
           d %>% 
             filter(region==ga) %>%
@@ -352,15 +380,16 @@ reg <- lapply(c('Sub-Saharan Africa','The Americas'), function(ga) {
             filter(n()>1) %>% 
             ungroup())
   )
-}) %>% set_names(c('Sub-Saharan Africa','The Americas'))
+}) %>% 
+  set_names(c('Sub-Saharan Africa','The Americas'))
 
 # logistic regression
 reg2 <- lapply(c('Sub-Saharan Africa','The Americas'), function(ga) {
   list(
     glm(exp1 %>% str_replace('skin','skin2'), family = binomial(link='logit'), 
-        d %>% filter(region==ga) %>% mutate(across(paste0('X',1:5), ~ ./10))),
+        d %>% filter(region==ga) %>% mutate(across(paste0('X',1:4), ~ ./10))),
     glm(exp2 %>% str_replace('skin','skin2'), family = binomial(link='logit'),
-        d %>% filter(region==ga) %>% mutate(across(paste0('X',1:5), ~ ./10)))
+        d %>% filter(region==ga) %>% mutate(across(paste0('X',1:4), ~ ./10)))
   )
 }) %>% set_names(c('Sub-Saharan Africa','The Americas'))
 
@@ -371,14 +400,14 @@ for (ga in c('Sub-Saharan Africa','The Americas')) {
   ame[[ga]][[1]] <- avg_slopes(reg2[[ga]][[1]], 
                                d %>% 
                                  filter(region==ga) %>% 
-                                 mutate(across(paste0('X',1:5), ~ ./10)) %>%
+                                 mutate(across(paste0('X',1:4), ~ ./10)) %>%
                                  drop_na(skin2, female, age3))
   ame[[ga]][[1]]$estimate <- ame[[ga]][[1]]$estimate/10
   ame[[ga]][[1]]$std.error <- ame[[ga]][[1]]$std.error/10
   ame[[ga]][[2]] <- avg_slopes(reg2[[ga]][[2]], 
                                d %>% 
                                  filter(region==ga) %>% 
-                                 mutate(across(paste0('X',1:5), ~ ./10)) %>%
+                                 mutate(across(paste0('X',1:4), ~ ./10)) %>%
                                  drop_na(skin2, female, age3, fam_ses, nhood_ses))
   ame[[ga]][[2]]$estimate <- ame[[ga]][[2]]$estimate/10
   ame[[ga]][[2]]$std.error <- ame[[ga]][[2]]$std.error/10
@@ -438,7 +467,7 @@ rows <- c('Basic Controls', rep('X',8),
   matrix(nrow = 4, byrow = T) %>%
   as.data.frame() %>%
   rbind(mean_skin['skin',])
-attr(rows, 'position') <- c(9:13)
+attr(rows, 'position') <- c(7:11)
 
 tbl3_reg <- modelsummary(c(reg$`Sub-Saharan Africa`, reg$`The Americas`), 
                          estimate = '{estimate}{stars}',
@@ -449,14 +478,14 @@ tbl3_reg <- modelsummary(c(reg$`Sub-Saharan Africa`, reg$`The Americas`),
   set_header_labels(values = c('', rep(paste('Model',1:4),2))) %>%
   add_header_row(values = c('', 'Skin tone\n(OLS)','Skin tone\n(OLS)'), 
                  colwidths = c(1,4,4), top = T) %>%
-  add_header_row(values = c('', 'Sub-Saharan Africa','The Americas'), 
+  add_header_row(values = c('', 'Self-Reported Ancestral Sub-Saharan Africans',
+                            'Self-Reported Ancestral Americans'), 
                  colwidths = c(1,4,4), top = T) %>%
   align(align = 'center', part = 'header') %>%
   compose(i = 1, j = 1, value = as_paragraph(as_i('P'), as_sup('AFR'), ' (10 pp)')) %>%
   compose(i = 3, j = 1, value = as_paragraph(as_i('P'), as_sup('EAS'), ' (10 pp)')) %>%
   compose(i = 5, j = 1, value = as_paragraph(as_i('P'), as_sup('IAM'), ' (10 pp)')) %>%
-  compose(i = 7, j = 1, value = as_paragraph(as_i('P'), as_sup('MEA'), ' (10 pp)')) %>%
-  hline(i = 12) %>%
+  hline(i = 10) %>%
   vline(j = 5) %>%
   autofit()
 
@@ -489,8 +518,7 @@ tbl3_ame <- modelsummary(c(ame$`Sub-Saharan Africa`, ame$`The Americas`),
   compose(i = 1, j = 1, value = as_paragraph(as_i('P'), as_sup('AFR'), ' (10 pp)')) %>%
   compose(i = 3, j = 1, value = as_paragraph(as_i('P'), as_sup('EAS'), ' (10 pp)')) %>%
   compose(i = 5, j = 1, value = as_paragraph(as_i('P'), as_sup('IAM'), ' (10 pp)')) %>%
-  compose(i = 7, j = 1, value = as_paragraph(as_i('P'), as_sup('MEA'), ' (10 pp)')) %>%
-  hline(i = c(8,10)) %>%
+  hline(i = c(6,8)) %>%
   vline(j = 3) %>%
   autofit()
 
@@ -501,14 +529,14 @@ skin_mr2 <- lapply(c('Sub-Saharan Africa','The Americas'), function(ga) {
   td <- d %>% filter(region==ga) %>% drop_na(skin, female, age3)
   r2 <- summary(reg[[ga]][[1]])[['r.squared']]
   r2o <- summary(lm(skin ~ female + age3 + I(age3^2), td))[['r.squared']]
-  dr0 <- summary(lm(skin ~ X1 + X3 + X4 + X5, td))[['r.squared']]
+  dr0 <- summary(lm(skin ~ X1 + X3 + X4, td))[['r.squared']]
   dr1 <- r2 - r2o
   combined <- data.frame(model = c('Null', 'Basic controls', 'Basic controls & others GSPs'),
                          term = 'Combined', marginal_r2 = sprintf('%.3f', c(dr0,dr1,dr1)))
-  lapply(paste0('X',c(1,3:5)), function(x) {
+  lapply(paste0('X',c(1,3:4)), function(x) {
     exp1 <- paste('skin ~ ', x)
     exp2 <- paste('skin ~ female + age3 + I(age3^2) +', x)
-    exp3 <- paste('skin ~ female + age3 + I(age3^2) +', paste(setdiff(paste0('X',c(1,3:5)),x), collapse = ' + '))
+    exp3 <- paste('skin ~ female + age3 + I(age3^2) +', paste(setdiff(paste0('X',c(1,3:4)),x), collapse = ' + '))
     m1 <- lm(exp1, td)
     m2 <- lm(exp2, td)
     m3 <- lm(exp3, td)
@@ -523,8 +551,7 @@ skin_mr2 <- lapply(c('Sub-Saharan Africa','The Americas'), function(ga) {
     bind_rows() %>%
     rbind(combined) %>%
     mutate(term = case_when(term=='X1' ~ '*P*^AFR^', term=='X3' ~ '*P*^EAS^',
-                            term=='X4' ~ '*P*^IAM^', term=='X5' ~ '*P*^MEA^',
-                            T ~ term)) %>%
+                            term=='X4' ~ '*P*^IAM^', T ~ term)) %>%
     return()
 }) %>% 
   set_names(c('Sub-Saharan Africa','The Americas')) %>%
@@ -533,7 +560,7 @@ skin_mr2 <- lapply(c('Sub-Saharan Africa','The Americas'), function(ga) {
 
 # 2.4 Table 4 (main text): regression table for racial classification
 # prepare data
-d <- all$s5 %>%
+d <- all$s4 %>%
   rename(irace1 = irace) %>%
   pivot_longer(cols = matches('^age|^intid|^irace'),
                names_to = c('.value', 'wave'),
@@ -541,14 +568,16 @@ d <- all$s5 %>%
                values_drop_na = TRUE,
                values_transform = list(age = as.numeric)) %>%
   arrange(aid) %>%
-  mutate(region = factor(region3),
+  mutate(region = region3 %>% factor(),
          age2 = age*age, 
          inw = 1 - as.numeric(irace=='White'),
          ib = as.numeric(irace=='Black'),
-         across(paste0('X',1:5), ~ .*10))
+         across(paste0('X',1:4), ~ .*10),
+         ga_comb = paste(include_ssa, include_europe, include_eao,
+                         include_america, include_mesa, sep = ''))
 
 # create a variable for ancestral country fixed effects
-d <- all$s5 %>%
+d <- all$s4 %>%
   select(starts_with('CNTR ')) %>%
   drop_na() %>%
   mutate_all(~ifelse(.>0, 1, .)) %>%
@@ -562,22 +591,25 @@ d <- d %>%
   mutate(region = 'Sub-Saharan Africa') %>%
   rbind(d %>%
           filter(include_america==1) %>%
-          mutate(region = 'The Americas'))
+          mutate(region = 'The Americas')) %>%
+  rbind(d %>%
+          filter(include_europe==1) %>%
+          mutate(region = 'Europe'))
 
-exp1 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + X5'
-exp2 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + X5 + fam_ses + nhood_ses'
-exp3 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + X5 + skin + fam_ses + nhood_ses'
-exp4 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + X5 + skin + fam_ses + nhood_ses | intid'
-exp5 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + X5 + skin + fam_ses + nhood_ses | intid + cga_comb'
+exp1 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4'
+exp2 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + fam_ses + nhood_ses'
+exp3 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + skin + fam_ses + nhood_ses'
+exp4 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + skin + fam_ses + nhood_ses | intid'
+exp5 <- 'y ~ factor(sex) + age + age2 + X1 + X3 + X4 + skin + fam_ses + nhood_ses | intid + cga_comb'
 
-# OLS regression: linear probability models
+# linear probability models
 reg <- list(d %>% filter(region=='Sub-Saharan Africa') %>% rename(y = ib), 
             d %>% filter(region=='The Americas' & wave=='1') %>% rename(y = inw)) %>%
   lapply(function(data) {
     list(
-      lm_robust(as.formula(exp1), clusters = aid, data),
-      lm_robust(as.formula(exp2), clusters = aid, data),
-      lm_robust(as.formula(exp3), clusters = aid, data),
+      lm_robust(as.formula(exp1), clusters = aid, data), 
+      lm_robust(as.formula(exp2), clusters = aid, data), 
+      lm_robust(as.formula(exp3), clusters = aid, data), 
       feols(as.formula(exp4), cluster = 'aid', 
             data %>%
               drop_na(sex, age, skin, fam_ses, nhood_ses, intid, y) %>%
@@ -601,9 +633,9 @@ reg <- list(d %>% filter(region=='Sub-Saharan Africa') %>% rename(y = ib),
 # logistic regression
 reg2 <- list(d %>% 
                filter(region=='Sub-Saharan Africa') %>% 
-               mutate(y = ib, across(paste0('X',1:5), ~ ./10)), 
+               mutate(y = ib, across(paste0('X',1:4), ~ ./10)), 
              d %>% filter(region=='The Americas' & wave=='1') %>% 
-               mutate(y = inw, across(paste0('X',1:5), ~ ./10))) %>%
+               mutate(y = inw, across(paste0('X',1:4), ~ ./10))) %>%
   lapply(function(data) {
     list(
       glm(exp1, data, family = binomial()),
@@ -626,7 +658,7 @@ for (ga in c('Sub-Saharan Africa','The Americas')) {
                                td %>% 
                                  filter(region==ga) %>% 
                                  mutate(y = ifelse(grepl('Africa',region),ib,inw),
-                                        across(paste0('X',1:5), ~ ./10)) %>%
+                                        across(paste0('X',1:4), ~ ./10)) %>%
                                  drop_na(y, sex, age))
   ame[[ga]][[1]]$estimate <- ame[[ga]][[1]]$estimate/10
   ame[[ga]][[1]]$std.error <- ame[[ga]][[1]]$std.error/10
@@ -634,7 +666,7 @@ for (ga in c('Sub-Saharan Africa','The Americas')) {
                                td %>% 
                                  filter(region==ga) %>% 
                                  mutate(y = ifelse(grepl('Africa',region),ib,inw),
-                                        across(paste0('X',1:5), ~ ./10)) %>%
+                                        across(paste0('X',1:4), ~ ./10)) %>%
                                  drop_na(y, sex, age, fam_ses, nhood_ses))
   ame[[ga]][[2]]$estimate <- ame[[ga]][[2]]$estimate/10
   ame[[ga]][[2]]$std.error <- ame[[ga]][[2]]$std.error/10
@@ -642,7 +674,7 @@ for (ga in c('Sub-Saharan Africa','The Americas')) {
                                td %>% 
                                  filter(region==ga) %>% 
                                  mutate(y = ifelse(grepl('Africa',region),ib,inw),
-                                        across(paste0('X',1:5), ~ ./10)) %>%
+                                        across(paste0('X',1:4), ~ ./10)) %>%
                                  drop_na(y, sex, age, fam_ses, nhood_ses, skin))
   ame[[ga]][[3]]$estimate <- ame[[ga]][[3]]$estimate/10
   ame[[ga]][[3]]$std.error <- ame[[ga]][[3]]$std.error/10
@@ -663,10 +695,10 @@ n_meany <- list(d %>% filter(region=='Sub-Saharan Africa') %>% rename(y = ib),
         drop_na(sex, age, y) %>%
         summarise(y = mean(y), n = length(unique(aid))),
       data %>% 
-        drop_na(sex, age, skin, fam_ses, nhood_ses, y) %>%
+        drop_na(sex, age, fam_ses, nhood_ses, y) %>%
         summarise(y = mean(y), n = length(unique(aid))),
       data %>% 
-        drop_na(sex, age, skin, fam_ses, nhood_ses, skin, y) %>%
+        drop_na(sex, age, skin, fam_ses, nhood_ses, y) %>%
         summarise(y = mean(y), n = length(unique(aid))),
       data %>% 
         drop_na(sex, age, skin, fam_ses, nhood_ses, intid, y) %>%
@@ -705,7 +737,7 @@ rows <- c('Basic Controls', rep('X',10),
   matrix(nrow = 5, byrow = T) %>%
   rbind(n_meany) %>%
   as.data.frame()
-attr(rows, 'position') <- c(9:15)
+attr(rows, 'position') <- c(7:13)
 
 tbl4_reg <- modelsummary(c(reg$`Sub-Saharan Africa`, reg$`The Americas`),
                          estimate = '{estimate}{stars}',
@@ -720,12 +752,11 @@ tbl4_reg <- modelsummary(c(reg$`Sub-Saharan Africa`, reg$`The Americas`),
   compose(i = 1, j = 1, value = as_paragraph(as_i('P'), as_sup('AFR'), ' (10 pp)')) %>%
   compose(i = 3, j = 1, value = as_paragraph(as_i('P'), as_sup('EAS'), ' (10 pp)')) %>%
   compose(i = 5, j = 1, value = as_paragraph(as_i('P'), as_sup('IAM'), ' (10 pp)')) %>%
-  compose(i = 7, j = 1, value = as_paragraph(as_i('P'), as_sup('MEA'), ' (10 pp)')) %>%
-  hline(i = 13) %>%
+  hline(i = 11) %>%
   vline(j = 6) %>%
   autofit()
 
-# upper panel of table 3: AMEs from logistic regression
+# upper panel of table 4: AMEs from logistic regression
 rows2 <- c('Basic Controls', rep('X',6),
            'Socioeconomic Controls', '', rep('X',2), '', rep('X',2),
            'Skin Tone Control', rep(' ',2), 'X', rep(' ',2), 'X') %>%
@@ -751,13 +782,13 @@ tbl4_ame <- modelsummary(c(ame$`Sub-Saharan Africa`, ame$`The Americas`),
   set_header_labels(values = c('', paste('Model',rep(1:3,2)))) %>%
   add_header_row(values = c('', 'Classified as Black\n(Logistic)', 'Classified as Non-White\n(Logistic)'), 
                  colwidths = c(1,3,3), top = T) %>%
-  add_header_row(values = c('', 'Sub-Saharan Africa', 'The Americas'), colwidths = c(1,3,3)) %>%
+  add_header_row(values = c('', 'Self-Reported Ancestral Sub-Saharan Africans',
+                            'Self-Reported Ancestral Americans'), colwidths = c(1,3,3)) %>%
   align(align = 'center', part = 'header') %>%
   compose(i = 1, j = 1, value = as_paragraph(as_i('P'), as_sup('AFR'), ' (10 pp)')) %>%
   compose(i = 3, j = 1, value = as_paragraph(as_i('P'), as_sup('EAS'), ' (10 pp)')) %>%
   compose(i = 5, j = 1, value = as_paragraph(as_i('P'), as_sup('IAM'), ' (10 pp)')) %>%
-  compose(i = 7, j = 1, value = as_paragraph(as_i('P'), as_sup('MEA'), ' (10 pp)')) %>%
-  hline(i = c(8,11)) %>%
+  hline(i = c(6,9)) %>%
   vline(j = 4) %>%
   autofit()
 
@@ -768,21 +799,21 @@ y_mr2 <- list(d %>% filter(region=='Sub-Saharan Africa') %>% rename(y = ib),
               d %>% filter(region=='The Americas' & wave=='1') %>% rename(y = inw)) %>%
   lapply(function(data) {
     td <- data %>% drop_na(y, sex, age, skin)
-    r2 <- summary(lm_robust(y ~ factor(sex) + age + age2 + X1 + X3 + X4 + X5, clusters = aid, td))[['r.squared']]
+    r2 <- summary(lm_robust(y ~ factor(sex) + age + age2 + X1 + X3 + X4, clusters = aid, td))[['r.squared']]
     r2o <- summary(lm_robust(y ~ factor(sex) + age + age2, clusters = aid, td))[['r.squared']]
-    r2f1 <- summary(lm_robust(y ~ factor(sex) + age + age2 + skin + X1 + X3 + X4 + X5, clusters = aid, td))[['r.squared']]
+    r2f1 <- summary(lm_robust(y ~ factor(sex) + age + age2 + skin + X1 + X3 + X4, clusters = aid, td))[['r.squared']]
     r2f2 <- summary(lm_robust(y ~ factor(sex) + age + age2 + skin, clusters = aid, td))[['r.squared']]
-    dr0 <- summary(lm_robust(y ~ X1 + X3 + X4 + X5, clusters = aid, td))[['r.squared']]
+    dr0 <- summary(lm_robust(y ~ X1 + X3 + X4, clusters = aid, td))[['r.squared']]
     dr1 <- r2 - r2o
     dr2 <- r2f1 - r2f2
     combined <- data.frame(model = c('Null', 'Basic controls', 'Basic controls & others GSPs',
                                      'Basic controls, others GSPs, & skin tone'),
                            term = 'Combined', marginal_r2 = sprintf('%.3f', c(dr0,dr1,dr1,dr2)))
-    lapply(paste0('X',c(1,3:5)), function(x) {
+    lapply(paste0('X',c(1,3:4)), function(x) {
       exp1 <- paste('y ~ ', x)
       exp2 <- paste('y ~ factor(sex) + age + age2 +', x)
-      exp3 <- paste('y ~ factor(sex) + age + age2 +', paste(setdiff(paste0('X',c(1,3:5)),x), collapse = ' + '))
-      exp4 <- paste('y ~ factor(sex) + age + age2 + skin +', paste(setdiff(paste0('X',c(1,3:5)),x), collapse = ' + '))
+      exp3 <- paste('y ~ factor(sex) + age + age2 +', paste(setdiff(paste0('X',c(1,3:4)),x), collapse = ' + '))
+      exp4 <- paste('y ~ factor(sex) + age + age2 + skin +', paste(setdiff(paste0('X',c(1,3:4)),x), collapse = ' + '))
       m1 <- lm_robust(as.formula(exp1), clusters = aid, td)
       m2 <- lm_robust(as.formula(exp2), clusters = aid, td)
       m3 <- lm_robust(as.formula(exp3), clusters = aid, td)
@@ -800,20 +831,33 @@ y_mr2 <- list(d %>% filter(region=='Sub-Saharan Africa') %>% rename(y = ib),
       bind_rows() %>%
       rbind(combined) %>%
       mutate(term = case_when(term=='X1' ~ '*P*^AFR^', term=='X3' ~ '*P*^EAS^',
-                              term=='X4' ~ '*P*^IAM^', term=='X5' ~ '*P*^MEA^',
-                              T ~ term)) %>%
+                              term=='X4' ~ '*P*^IAM^', T ~ term)) %>%
       return()
   }) %>% 
   set_names(c('Sub-Saharan Africa','The Americas')) %>%
   bind_rows(.id = 'sample')
 
+y_skin_mr2 <- list(d %>% filter(region=='Sub-Saharan Africa') %>% rename(y = ib), 
+                   d %>% filter(region=='The Americas' & wave=='1') %>% rename(y = inw)) %>%
+  lapply(function(data) {
+    td <- data %>% drop_na(y, sex, age, skin)
+    r2a <- summary(lm_robust(y ~ factor(sex) + age + age2 + X1 + X3 + X4, clusters = aid, td))[['r.squared']]
+    r2b <- summary(lm_robust(y ~ factor(sex) + age + age2 + skin + X1 + X3 + X4, clusters = aid, td))[['r.squared']]
+    dr <- r2b - r2a
+    data.frame(model = 'Basic controls, others GSPs, & skin tone',
+               term = 'Skin tone', marginal_r2 = sprintf('%.3f', dr)) %>%
+      return()
+  }) %>% 
+  set_names(c('Sub-Saharan Africa','The Americas')) %>%
+  bind_rows(.id = 'sample')
 
-# Table 9 (appendix): marginal R2 of genetic similarity proportions for skin tone and racial classification
-tbl_s9 <- skin_mr2 %>%
+# Table 14 (appendix): marginal R2 of genetic similarity proportions for skin tone and racial classification
+mr2_tbl <- skin_mr2 %>%
   mutate(outcome = 'Skin tone') %>%
   filter(model=='Basic controls & others GSPs') %>%
   rbind(y_mr2 %>%
           filter(model %in% c('Basic controls & others GSPs','Basic controls, others GSPs, & skin tone')) %>%
+          rbind(y_skin_mr2) %>%
           mutate(outcome = 'Racial classification')) %>%
   mutate(outcome = factor(outcome, levels = c('Skin tone','Racial classification'))) %>%
   arrange(outcome, model, sample, term, marginal_r2) %>%
@@ -821,42 +865,43 @@ tbl_s9 <- skin_mr2 %>%
   flextable() %>%
   set_header_labels(values = c('Outcome', 'Model', 'Sample', 'Term', 'Marginal R2')) %>%
   merge_v(j = c(1,3)) %>%
-  merge_at(i = 1:10, j = 2) %>%
-  merge_at(i = 11:20, j = 2) %>%
-  merge_at(i = 21:30, j = 2) %>%
-  hline(i = 10) %>%
-  hline(i = 20, j = 2:5) %>%
-  hline(i = c(5,15,25), j = 3:5) %>%
+  merge_at(i = 1:8, j = 2) %>%
+  merge_at(i = 9:16, j = 2) %>%
+  merge_at(i = 17:24, j = 2) %>%
+  hline(i = 8) %>%
+  hline(i = 16, j = 2:5) %>%
+  hline(i = c(4,12,21), j = 3:5) %>%
   colformat_md() %>%
   autofit()
 
-save_as_docx(tbl_s9, path = 'tables/appendix_table9.docx')
+save_as_docx(mr2_tbl, path = 'tables/appendix_gsp_mr2.docx')
 
 
 # 2.5 Table 1 (appendix): top 5 countries that comprise each ancestry category (the fraction version)
-d <- all[[1]] %>%
+top_countries_wt <- all$s4 %>%
   filter(`SUBREG America`==0, `SUBREG Canada`==0, `SUBREG Other`==0) %>%
   select(starts_with('CNTR '), -paste('CNTR', c('Other','America','Canada'))) %>%
   colSums(na.rm = T) %>%
   as.data.frame() %>%
   rownames_to_column()
 
-names(d) <- c('country', 'n')
+names(top_countries_wt) <- c('country', 'n')
 
-d <- d %>%
+top_countries_wt <- top_countries_wt %>%
   mutate(country = str_remove(country, 'CNTR ')) %>%
   left_join(meta) %>%
   group_by(region, subregion) %>%
   arrange(subregion, desc(n)) %>%
   slice_head(n = 5) %>%
-  transmute(region, subregion, country = paste0(country, ' (', round(n), ')'),
+  transmute(region = region, subregion = subregion,
+            country = paste0(country, ' (', round(n), ')'),
             ind = paste0('country', row_number())) %>%
   spread(ind, country) %>%
   ungroup() %>%
   rename(Region = region, `Sub-region` = subregion) %>%
   rename_with(capitalize, starts_with('country'))
 
-tbl_s1 <- d %>%
+tbl_s1 <- top_countries_wt %>%
   mutate(across(starts_with('country'),  ~ str_remove(., '\\*'))) %>%
   flextable() %>%
   add_footer_lines(value = as_paragraph(c('Other Middle East = Afghanistan, Armenia, Bahrain, Iran, Iraq, Israel, Jordan, Kuwait, Palestine, Oman, Qatar, Saudi Arabia, Syria, Turkey, United Arab Emirates, and Yemen',
@@ -869,15 +914,16 @@ tbl_s1 <- d %>%
                                           'Other South America = Argentina, Bolivia, Brazil, Chile, Ecuador, French Guiana, Paraguay, Peru, Suriname, and Uruguay'))) %>%
   autofit()
 
-save_as_docx(tbl_s1, path = 'tables/appendix_table1.docx')
+save_as_docx(tbl_s1, path = 'tables/appendix_top5_countries.docx')
 
 
-# 2.6 Table 2 (appendix): best_race vs geographic ancestry
-d <- all$s5 %>%
+# 2.6 Table 2 (appendix): self-reported race vs geographic ancestry
+d <- all$s4 %>%
+  left_join(best_race) %>%
   mutate(best_race = factor(best_race, levels = c('NHW','Hispanic','NHB','AAPI','AINA')),
          region3 = factor(region3, levels = region_label)) # treat USA & Canada as missing
 
-tbl_s2_upper <- table(d$best_race, d$region3, useNA = 'ifany') %>%
+tbl2a <- table(d$best_race, d$region3, useNA = 'ifany') %>%
   as.data.frame() %>%
   filter(Var1!=' ') %>%
   group_by(Var1) %>%
@@ -888,7 +934,7 @@ tbl_s2_upper <- table(d$best_race, d$region3, useNA = 'ifany') %>%
   spread(Var2, label) %>%
   rename(Missing = `<NA>`)
 
-tbl_s2_lower <- d %>%
+tbl2b <- d %>%
   drop_na(best_race) %>%
   group_by(best_race) %>%
   summarise(across(starts_with('include_'), ~sum(., na.rm = T)),
@@ -896,11 +942,11 @@ tbl_s2_lower <- d %>%
   mutate(across(starts_with('include_'), ~ paste0(.,'\n(', sprintf('%.2f',./valid*100),'%)'))) %>%
   select(best_race, paste0('include_',c('europe','america','ssa','eao','mesa')), miss) %>%
   arrange(best_race)
-names(tbl_s2_lower) <- names(tbl_s2_upper)
+names(tbl2b) <- names(tbl2a)
 
-tbl_s2 <- tbl_s2_upper %>%
+tbl_s2 <- tbl2a %>%
   mutate(type = 'Single Ancestral Region') %>%
-  rbind(tbl_s2_lower %>%
+  rbind(tbl2b %>%
           mutate(type = 'All Ancestral Regions')) %>%
   mutate(type = ifelse(` `=='NHW', type, NA)) %>%
   relocate(type, .before = ` `) %>%
@@ -910,131 +956,61 @@ tbl_s2 <- tbl_s2_upper %>%
   align(j = 3:8, align = 'center') %>%
   autofit()
 
-save_as_docx(tbl_s2, path = 'tables/appendix_table2.docx')
+save_as_docx(tbl_s2, path = 'tables/appendix_race_vs_ancestry.docx')
 
 
-# 2.7 Table 3 (appendix): unsupervised  & supervised K = 6 (the fraction version)
-d <- all$s6 %>%
-  select(aid, starts_with('REGION '), starts_with('SUBREG '),
-         `s6_Sub−Saharan African` = X1, s6_European = X2, `s6_East Asian` = X3,
-         `s6_Indigenous American` = X4, `s6_Middle Eastern` = X5, s6_Oceania = X6) %>%
-  left_join(all$us6 %>% select(aid, paste0('X',1:6)) %>% rename_with(~ paste0('us6_',.), paste0('X',1:6)))
+# 2.7 Table 3 (appendix): unsupervised K = 5 (the fraction version)
+k5 <- all[c('us5', 's5')]
+colnames(k5$us5)[1:5] <- paste0('us5_', colnames(k5$us5)[1:5])
+colnames(k5$s5)[1:5] <- paste0('s5_', colnames(k5$s5)[1:5]) %>%
+  str_replace('X1', 'Sub−Saharan African') %>%
+  str_replace('X2', 'European') %>%
+  str_replace('X3', 'East Asian') %>%
+  str_replace('X4', 'Indigenous American') %>%
+  str_replace('X5', 'Middle Eastern')
 
-# reliability
-reliability <- all_stats %>%
-    filter(admixture=='s6') %>%
-    gather('key', 'value', starts_with('X')) %>%
-    separate('key' , c('X', 'stats'), '_') %>%
-    spread('stats', 'value') %>%
-    group_by(X) %>%
-    summarise(
-      mean_b = mean(b), tss_b = sum((b-mean_b)^2), sum_var = sum(se^2),
-      rel = 1-sum_var/tss_b
-    ) %>%
-    ungroup() %>%
-    drop_na() %>%
-    select(X, rel) %>%
-    spread('X', 'rel') %>%
-    mutate(across(X1:X6, ~ sprintf('%.3f',.)))
+table_k5 <- k5$us5 %>%
+  select(aid, starts_with('REGION '), starts_with('SUBREG '), starts_with('us5_')) %>%
+  left_join(k5$s5 %>% select(aid, starts_with('s5_')))
 
-# correlation
-cor <- d %>%
-  mutate(X1 = sprintf('%.3f', cor(us6_X1, `s6_Sub−Saharan African`)),
-         X2 = sprintf('%.3f', cor(us6_X2, `s6_European`)),
-         X3 = sprintf('%.3f', cor(us6_X3, `s6_East Asian`)),
-         X4 = sprintf('%.3f', cor(us6_X4, `s6_Indigenous American`)),
-         X5 = sprintf('%.3f', cor(us6_X5, `s6_Middle Eastern`)),
-         X6 = sprintf('%.3f', cor(us6_X6, `s6_Oceania`))) %>% 
-  select(X1:X6) %>%
-  unique()
+tbl_us5 <- summarytable2(table_k5, paste0('us5_X', 1:5))
+tbl_s5 <- summarytable2(table_k5, paste0('s5_', c(ancestry_label,'Middle Eastern')))
 
-raw <- summarytable2(d, paste0('s6_', c(ancestry_label,'Oceania')))
+cor_k5 <- all[c('us5', 's5')] %>%
+  map(~{
+    .x <- .x %>%
+      select(aid, paste0('X',1:5))
+  }) %>%
+  bind_rows(.id = 'admixture') %>%
+  gather(ancestry, X, X1:X5) %>%
+  spread(admixture, X) %>%
+  group_by(ancestry) %>%
+  summarise(cor = sprintf('%.3f', cor(s5, us5))) %>%
+  ungroup() %>%
+  spread(ancestry, cor)
 
-tbl_s3_upper <- raw %>%
+panelA_us5 <- tbl_us5 %>%
   mutate(Region = case_when(Subregion=='Total' ~ Region, T ~ ''),
          `N = 8055` = paste0(sprintf('%.0f',`N = 8055`), ' (',
                              sprintf('%.0f', prop*100), '%)')) %>%
-  rename_with(~ str_remove(.,'s6_'), starts_with('s6_')) %>%
+  rename_with(function(x) x = str_replace(x, 'us5', 'Unsupervised 5'), starts_with('us5')) %>%
   select(-prop) %>%
-  rbind(reliability %>% 
-          transmute(Region = 'Reliability', Subregion = '', `N = 8055` = '', 
-                    `Sub−Saharan African` = X1, `European` = X2,
-                    `East Asian` = X3, `Indigenous American` = X4,
-                    `Middle Eastern` = X5, `Oceania` = X6)) %>%
   rename(`Sub-Region` = Subregion) %>%
   flextable() %>%
-  add_header_row(values = c('','*P*^AFR^','*P*^EUR^','*P*^EAS^','*P*^IAM^','*P*^MEA^','*P*^OCE^'),
-                 colwidths = c(3,rep(1,6))) %>%
-  add_header_row(values = c('', 'Supervised 6'), colwidths = c(3,6)) %>%
+  split_header() %>%
+  merge_h(part = 'header') %>%
+  set_header_labels(values = c(rep('',3), '*P*^1^','*P*^2^','*P*^3^',
+                               '*P*^4^','*P*^5^')) %>%
   align(align = 'center', part = 'header') %>%
   colformat_md(part = 'header') %>%
-  merge_at(i = nrow(raw)+1, j = 1:2) %>%
-  align(i = nrow(raw)+1, j = 1, align = 'center') %>%
-  align(j = 4:9, align = 'center') %>%
-  bold(i = nrow(raw)+1, j = 1) %>%
+  align(j = 4:8, align = 'center') %>%
   autofit()
 
-tbl_s3_lower <- cor %>%
-  transmute(` ` = '', `  ` = '', `   ` = '', X1, X2, X3, X4, X5, X6) %>%
-  flextable() %>%
-  set_header_labels(values = c('','','','*P*^1^,*P*^AFR^','*P*^2^,*P*^EUR^','*P*^3^,*P*^EAS^',
-                               '*P*^4^,*P*^IAM^','*P*^5^,*P*^MEA^','*P*^6^,*P*^OCE^')) %>%
-  add_header_row(values = c('', 'Unsupervised-Supervised Correlation'), colwidths = c(3,6)) %>%
-  align(align = 'center', part = 'header') %>%
-  align(j = 4:9, align = 'center') %>%
-  colformat_md(part = 'header') %>%
-  autofit()
-
-save_as_docx(tbl_s3_upper, tbl_s3_lower, path = 'tables/appendix_table3.docx')
-
-
-# 2.8 Table 4 (appendix): ICCs of the five GSPs by ancestry group
-d <- all$s5 %>%
-  mutate(region = factor(region3), subregion = factor(subregion2), country = factor(country2))
-d <- d %>%
-  select(starts_with('CNTR ')) %>%
-  drop_na() %>%
-  mutate_all(~ifelse(.>0, 1, .)) %>%
-  transmute(cga_comb = do.call(paste, c(., sep = ' '))) %>%
-  cbind(d %>% drop_na(starts_with('CNTR ')) %>% select(aid)) %>%
-  right_join(d)
-
-tbl_s4 <- lapply(paste0('X',1:5), function(y) {
-  lapply(c('region','subregion','country','cga_comb'), function(r) {
-    lmer(as.formula(paste(y, '~ 1 |', r)), d) %>%
-      performance::icc() %>%
-      as.data.frame()
-  }) %>%
-    bind_rows() %>%
-    mutate(geo_level = c('Region','Sub-region','Country','Country (multiple)'))
-}) %>%
-  set_names(paste0('X',1:5)) %>%
-  bind_rows(.id = 'term') %>%
-  transmute(Level = factor(geo_level, levels = c('Region','Sub-region','Country','Country (multiple)')),
-            Term = case_when(term=='X1' ~ '*P*^AFR^', term=='X2' ~ '*P*^EUR^', term=='X3' ~ '*P*^EAS^',
-                             term=='X4' ~ '*P*^IAM^', term=='X5' ~ '*P*^MEA^'),
-            ICC = sprintf('%.3f', ICC_unadjusted)) %>%
-  arrange(Level) %>%
-  flextable() %>%
-  merge_v(j = 1) %>%
-  hline(i = c(5,10,15)) %>%
-  colformat_md() %>%
-  autofit()
-
-save_as_docx(tbl_s4, path = 'tables/appendix_table4.docx')
-
-
-# 2.9 Table 5 (appendix): supervised K = 5 - percentiles (the fraction version)
-d <- all$s5 %>%
-  select(aid, starts_with('REGION '), starts_with('SUBREG '), 
-         `s5_Sub−Saharan African` = X1, s5_European = X2, `s5_East Asian` = X3,
-         `s5_Indigenous American` = X4, `s5_Middle Eastern` = X5)
-
-tbl_s5 <- summarytable3(d, paste0('s5_', ancestry_label)) %>%
+panelB_s5 <- tbl_s5 %>%
   mutate(Region = case_when(Subregion=='Total' ~ Region, T ~ ''),
          `N = 8055` = paste0(sprintf('%.0f',`N = 8055`), ' (',
                              sprintf('%.0f', prop*100), '%)')) %>%
-  rename_with(~ str_remove(.,'s5_'), starts_with('s5_')) %>%
+  rename_with(function(x) x = str_remove(x, 's5_'), starts_with('s5_')) %>%
   select(-prop) %>%
   rename(`Sub-Region` = Subregion) %>%
   flextable() %>%
@@ -1046,37 +1022,123 @@ tbl_s5 <- summarytable3(d, paste0('s5_', ancestry_label)) %>%
   align(j = 4:8, align = 'center') %>%
   autofit()
 
-save_as_docx(tbl_s5, path = 'tables/appendix_table5.docx')
+panelC_k5 <- cor_k5 %>%
+  transmute(` ` = '', `  ` = '', `   ` = '', X1, X2, X3, X4, X5) %>%
+  flextable() %>%
+  set_header_labels(values = c('','','','*P*^1^,*P*^AFR^','*P*^2^,*P*^EUR^','*P*^3^,*P*^EAS^',
+                               '*P*^4^,*P*^IAM^','*P*^5^,*P*^MEA^')) %>%
+  add_header_row(values = c('', 'Unsupervised-Supervised Correlation'), colwidths = c(3,5)) %>%
+  align(align = 'center', part = 'header') %>%
+  align(j = 4:8, align = 'center') %>%
+  colformat_md(part = 'header') %>%
+  autofit()
+
+save_as_docx(panelA_us5, panelB_s5, panelC_k5, path = 'tables/appendix_unadx5_tbl.docx')
 
 
-# 2.10 Table 7 (appendix): supervised K = 5 (the raw version)
-d <- all$s5 %>%
-  select(aid, subregion, region, `s5_Sub−Saharan African` = X1, s5_European = X2,
-         `s5_East Asian` = X3, `s5_Indigenous American` = X4, `s5_Middle Eastern` = X5)
+# 2.8 Table 4 (appendix): unsupervised K = 6 (the fraction version)
+us6 <- all$us6
+colnames(us6)[1:6] <- paste0('us6_', colnames(us6)[1:6])
 
-# region- & subregion-level statistics
-raw <- list(
-  summarytable(d %>% rename(by_var = subregion), paste0('s5_', ancestry_label), 'Subregion'),
-  summarytable(d %>% rename(by_var = region), paste0('s5_', ancestry_label), 'Region')
+tbl_us6 <- summarytable2(us6, paste0('us6_X', paste0(1:6)))
+
+cor_k6 <- all[c('us6','s6')] %>%
+  map(~{
+    .x <- .x %>%
+      select(aid, paste0('X',1:6))
+  }) %>%
+  bind_rows(.id = 'admixture') %>%
+  gather(ancestry, X, X1:X6) %>%
+  spread(admixture, X) %>%
+  group_by(ancestry) %>%
+  summarise(cor = sprintf('%.3f', cor(s6, us6))) %>%
+  ungroup() %>%
+  spread(ancestry, cor)
+
+panelA_us6 <- tbl_us6 %>%
+  mutate(Region = case_when(Subregion=='Total' ~ Region, T ~ ''),
+         `N = 8055` = paste0(sprintf('%.0f',`N = 8055`), ' (',
+                             sprintf('%.0f', prop*100), '%)')) %>%
+  rename_with(function(x) x = str_replace(x, 'us6', 'Unsupervised 6'), starts_with('us6')) %>%
+  select(-prop) %>%
+  rename(`Sub-Region` = Subregion) %>%
+  flextable() %>%
+  split_header() %>%
+  merge_h(part = 'header') %>%
+  set_header_labels(values = c(rep('',3), '*P*^1^','*P*^2^','*P*^3^',
+                               '*P*^4^','*P*^5^','*P*^6^')) %>%
+  align(align = 'center', part = 'header') %>%
+  colformat_md(part = 'header') %>%
+  align(j = 4:9, align = 'center') %>%
+  autofit()
+
+panelB_us6 <- cor_k6 %>%
+  transmute(` ` = '', `  ` = '', `   ` = '', X1, X2, X3, X4, X5, X6) %>%
+  flextable() %>%
+  set_header_labels(values = c('','','','*P*^1^,*P*^AFR^','*P*^2^,*P*^EUR^','*P*^3^,*P*^EAS^',
+                               '*P*^4^,*P*^IAM^','*P*^5^,*P*^MEA^','*P*^6^,*P*^OCE^')) %>%
+  add_header_row(values = c('', 'Unsupervised-Supervised Correlation'), colwidths = c(3,6)) %>%
+  align(align = 'center', part = 'header') %>%
+  align(j = 4:9, align = 'center') %>%
+  colformat_md(part = 'header') %>%
+  autofit()
+
+save_as_docx(panelA_us6, panelB_us6, path = 'tables/appendix_unadx6_tbl.docx')
+
+
+
+# 2.9 Table 6 (appendix): supervised K = 4 - percentiles (the fraction version)
+tbl_s4p <- summarytable3(table_k4, paste0('s4_', ancestry_label)) %>%
+  mutate(Region = case_when(Subregion=='Total' ~ Region, T ~ ''),
+         `N = 8055` = paste0(sprintf('%.0f',`N = 8055`), ' (',
+                             sprintf('%.0f', prop*100), '%)')) %>%
+  rename_with(function(x) x = str_remove(x, 's4_'), starts_with('s4_')) %>%
+  select(-prop) %>%
+  rename(`Sub-Region` = Subregion) %>%
+  flextable() %>%
+  add_header_row(values = c('','*P*^AFR^','*P*^EUR^','*P*^EAS^','*P*^IAM^'),
+                 colwidths = c(3,rep(1,4))) %>%
+  add_header_row(values = c('', 'Supervised 4'), colwidths = c(3,4)) %>%
+  align(align = 'center', part = 'header') %>%
+  colformat_md(part = 'header') %>%
+  align(j = 4:7, align = 'center') %>%
+  autofit()
+
+save_as_docx(tbl_s4p, path = 'tables/appendix_sadx4_percentiles.docx')
+
+
+# 2.10 Table 8 (appendix): supervised K = 4 (the raw version)
+table2_k4 <- k4$us4 %>%
+  select(aid, subregion, region, starts_with('us4_')) %>%
+  left_join(k4$s4 %>% select(aid, starts_with('s4_')))
+by_subregion <- table2_k4 %>% rename(by_var = subregion)
+by_region <- table2_k4 %>% rename(by_var = region)
+
+# subregion-level & region-level statistics
+tbl_s4_raw <- list(
+  summarytable(by_subregion, paste0('s4_', ancestry_label), F, F, F, T, 'Subregion'),
+  summarytable(by_region, paste0('s4_', ancestry_label), F, F, F, T, 'Region')
 ) %>%
   map(~{
     .x <- .x %>%
       modify_header(
-        `s5_Sub−Saharan African` = 'Sub−Saharan African',
-        s5_European = 'European',
-        `s5_East Asian` = 'East Asian',
-        `s5_Indigenous American` = 'Indigenous American',
-        `s5_Middle Eastern` = 'Middle Eastern'
+        `s4_Sub−Saharan African` = 'Sub−Saharan African',
+        s4_European = 'European',
+        `s4_East Asian` = 'East Asian',
+        `s4_Indigenous American` = 'Indigenous American'
       )
   }) %>%
   set_names(c('subregion', 'region'))
 
-tbl_s7 <- raw$subregion %>%
+tbl_s4r <- tbl_s4_raw$subregion %>%
   modify_table_body(
     ~.x %>% 
+      # remove undesired label rows
       filter(row_type!='label') %>%
-      rbind(raw$region$table_body %>%
+      # append region rows
+      rbind(tbl_s4_raw$region$table_body %>%
               filter(row_type!='label', label!='Sub-Saharan Africa')) %>%
+      # create grouping rows
       left_join(meta %>% select(region, subregion) %>% unique(),
                 by = c('label' = 'subregion')) %>%
       mutate(
@@ -1088,73 +1150,127 @@ tbl_s7 <- raw$subregion %>%
   ) %>%
   as_flex_table() %>%
   set_header_labels(groupname_col = 'Subregion', label = 'Sub-Region') %>%
-  add_header_row(values = c('','*P*^AFR^','*P*^EUR^','*P*^EAS^','*P*^IAM^','*P*^MEA^'),
-                 colwidths = c(3,rep(1,5))) %>%
-  add_header_row(values = c('', 'Supervised 5'), colwidths = c(3,5)) %>%
+  add_header_row(values = c('','*P*^AFR^','*P*^EUR^','*P*^EAS^','*P*^IAM^'),
+                 colwidths = c(3,rep(1,4))) %>%
+  add_header_row(values = c('', 'Supervised 4'), colwidths = c(3,4)) %>%
   align(align = 'center', part = 'header') %>%
   colformat_md(part = 'header') %>%
   bold(bold = F, part = 'header') %>%
   align(j = 1:3, align = 'left') %>%
   autofit()
 
-save_as_docx(tbl_s7, path = 'tables/appendix_table7.docx')
+save_as_docx(tbl_s4r, path = 'tables/appendix_sadx4_raw.docx')
+
+
+# 2.11 Table 9 (appendix): ICCs of the four GSPs by ancestry group
+d <- all$s4 %>%
+  mutate(region = factor(region3), subregion = factor(subregion2), country = factor(country2))
+d <- d %>%
+  select(starts_with('CNTR ')) %>%
+  drop_na() %>%
+  mutate_all(~ifelse(.>0, 1, .)) %>%
+  transmute(cga_comb = do.call(paste, c(., sep = ' '))) %>%
+  cbind(d %>% drop_na(starts_with('CNTR ')) %>% select(aid)) %>%
+  right_join(d)
+
+tbl_icc <- lapply(paste0('X',1:4), function(y) {
+  lapply(c('region','subregion','country','cga_comb'), function(r) {
+    lmer(as.formula(paste(y, '~ 1 |', r)), d) %>%
+      performance::icc() %>%
+      as.data.frame()
+  }) %>%
+    bind_rows() %>%
+    mutate(geo_level = c('Region','Sub-region','Country','Country (multiple)'))
+}) %>%
+  set_names(paste0('X',1:4)) %>%
+  bind_rows(.id = 'term') %>%
+  transmute(Level = factor(geo_level, levels = c('Region','Sub-region','Country','Country (multiple)')),
+            Term = case_when(term=='X1' ~ '*P*^AFR^', term=='X2' ~ '*P*^EUR^',
+                             term=='X3' ~ '*P*^EAS^', term=='X4' ~ '*P*^IAM^'),
+            ICC = sprintf('%.3f', ICC_unadjusted)) %>%
+  arrange(Level) %>%
+  flextable() %>%
+  merge_v(j = 1) %>%
+  hline(i = c(4,8,12)) %>%
+  colformat_md() %>%
+  autofit()
+
+save_as_docx(tbl_icc, path = 'tables/appendix_icc_gsp_ancestry.docx')
+
+
+# 2.12 Table 10 (appendix): racial classification by geographic ancestry
+td <- all$s4 %>%
+  select(aid, irace1 = irace, irace3, irace4, region3, starts_with('include_')) %>%
+  pivot_longer(cols = matches('^irace'),
+               names_to = c('.value', 'wave'),
+               names_pattern = '^(irace)(\\d+)$') %>%
+  filter(wave=='1')
+
+tbl_rcga <- table(td$region3, td$irace, useNA = 'ifany') %>%
+  as.data.frame() %>%
+  drop_na(Var1) %>%
+  group_by(Var1) %>%
+  mutate(` ` = 'Self-Reported Geographic Ancestry',
+         n = ifelse(is.na(Var2), NA, Freq),
+         percent = n/sum(n, na.rm = T)*100,
+         label = ifelse(is.na(Var2), Freq, paste0(Freq, ' \n(', sprintf('%.2f',percent),'%)'))) %>%
+  select(` `, `  ` = Var1, Var2, label) %>%
+  spread(Var2, label) %>%
+  select(` `, `  `, Black, White, `Asian & Pacific Islander`, `Native American`, Other, Missing = `<NA>`) %>%
+  flextable() %>%
+  merge_v(j = 1) %>%
+  rotate(j = 1, rotation = 'btlr') %>%
+  add_header_row(values = c('','Interviewer-Classified Race'), colwidths = c(2,6)) %>%
+  align(part = 'header', align = 'center') %>%
+  align(j = 2:7, align = 'center') %>%
+  autofit()
+
+save_as_docx(tbl_rcga, path = 'tables/appendix_racialclass_vs_ancestry.docx')
 
 
 
 # 3. Figures -------------------------------------------------------------------
 # 3.1 Figure 2 (main text): the genetic ancestry of the US
 # data preparation for river plot
-# weighted using W4 cross-sectional weights
-d <- all$s5 %>%
-  select(ipwgt, paste0('X',1:5)) %>%
+# weighted using IPWs
+fig2_dat <- all$s4 %>%
+  select(ipwgt, paste0('X',1:4)) %>%
   filter(!is.na(ipwgt)) %>%
-  mutate(across(X1:X5, function(x) x = x*ipwgt))
+  mutate(across(X1:X4, function(x) x = x*ipwgt))
 
 # average genetic similarity proportions at different Ks
-prop <- d %>%
-  summarise(across(X1:X5, function(x) x = weighted.mean(x, ipwgt))) %>%
+fig2_prop <- fig2_dat %>%
+  summarise(across(X1:X4, function(x) x = weighted.mean(x, ipwgt))) %>%
   gather(ID, prop) %>%
   mutate(prop = prop/sum(prop))
 
-s4 <- prop %>%
-  mutate(ID = ifelse(ID %in% c('X2','X5'), 'X2', ID)) %>%
-  group_by(ID) %>%
-  summarise(prop = sum(prop)) %>%
-  ungroup()
-s3 <- s4 %>%
+s3 <- fig2_prop %>%
   mutate(ID = ifelse(ID %in% c('X3','X4'), 'X3', ID)) %>%
   group_by(ID) %>%
   summarise(prop = sum(prop)) %>%
   ungroup()
+
 s2 <- s3 %>%
   mutate(ID = ifelse(ID=='X1', ID, 'X2')) %>%
   group_by(ID) %>%
   summarise(prop = sum(prop)) %>%
   ungroup()
 
-prop <- rbind(s2 %>% mutate(ID = paste0('s2_',ID)),
-              s3 %>% mutate(ID = paste0('s3_',ID)),
-              s4 %>% mutate(ID = paste0('s4_',ID)),
-              prop)
+fig2_prop <- rbind(s2 %>% mutate(ID = paste0('s2_',ID)),
+                   s3 %>% mutate(ID = paste0('s3_',ID)),
+                   fig2_prop)
 
 # prepare node data for the river plot
-s5 <- data.frame(Value = colMeans(d[paste0('X',1:5)])) %>%
+s4 <- data.frame(Value = colMeans(fig2_dat[,paste0('X',1:4)])) %>%
   rownames_to_column(var = 'ID') %>%
-  mutate(x = 4,
+  mutate(x = 3,
          col = case_when(
            ID=='X1' ~ '#ffc300', ID=='X2' ~ '#219ebc', ID=='X3' ~ '#a7c957', 
-           ID=='X4' ~ '#e76f51', ID=='X5' ~ '#6a4c93', T ~ NA
+           ID=='X4' ~ '#e76f51', T ~ NA
          ))
-s5 <- s5 %>% cbind(t(col2rgb(s5$col)) %>% as.data.frame())
-s4 <- s5 %>%
-  mutate(x = 3, ID = case_when(ID %in% c('X2', 'X5') ~ 's4_X2', T ~ paste0('s4_', ID))) %>%
-  group_by(ID) %>%
-  mutate(prop = Value/sum(Value)) %>%
-  summarise(Value = sum(Value), x = mean(x), 
-            red = sqrt(sum(prop*red^2)), green = sqrt(sum(prop*green^2)), blue = sqrt(sum(prop*blue^2))) %>%
-  mutate(col = rgb(red, green, blue, maxColorValue = 255))
+s4 <- s4 %>% cbind(t(col2rgb(s4$col)) %>% as.data.frame())
 s3 <- s4 %>%
-  mutate(x = 2, ID = case_when(ID %in% c('s4_X3', 's4_X4') ~ 's3_X3', T ~ ID %>% str_replace('s4','s3'))) %>%
+  mutate(x = 2, ID = case_when(ID %in% c('X3', 'X4') ~ 's3_X3', T ~ paste0('s3_', ID))) %>%
   group_by(ID) %>%
   mutate(prop = Value/sum(Value)) %>%
   summarise(Value = sum(Value), x = mean(x),
@@ -1175,62 +1291,47 @@ s1 <- s2 %>%
             red = sqrt(sum(prop*red^2)), green = sqrt(sum(prop*green^2)), blue = sqrt(sum(prop*blue^2)))%>%
   mutate(col = rgb(red, green, blue, maxColorValue = 255))
 
-nodes <- rbind(s1,s2,s3,s4,s5)
-nodes$labels <- c('','Sub-Saharan African', 'European, Middle Eastern,\nEast Asian, & Indigenous American',
-                  'Sub-Saharan African', 'European & Middle Eastern', 'East Asian &\nIndigenous American',
-                  'Sub-Saharan African', 'European & Middle Eastern', 'East Asian', 'Indigenous American',
-                  'Sub-Saharan African', 'European', 'East Asian', 'Indigenous American', 'Middle Eastern')
+nodes <- rbind(s1,s2,s3,s4)
+nodes$labels <- c('','Sub-Saharan African', 'European, \nEast Asian, & Indigenous American',
+                  'Sub-Saharan African', 'European', 'East Asian &\nIndigenous American',
+                  'Sub-Saharan African', 'European', 'East Asian', 'Indigenous American')
 nodes <- nodes %>%
-  left_join(prop) %>%
+  left_join(fig2_prop) %>%
   mutate(prop =ifelse(is.na(prop), '', paste0('(',sprintf('%.2f',prop*100),'%)')),
          labels = paste0(labels, '\n', prop))
 
-nodes <- data.frame(
-  ID = c('s1', paste0('s2_X', 1:2), paste0('s3_X', 1:3), paste0('s4_X', 1:4),
-         paste0('X', c(1:2,5,3:4)))
-) %>% left_join(nodes)
-
 # prepare edge data for the river plot
 edges <- data.frame(
-  N1 = c('s1', 's1', 's2_X1', 's2_X2', 's2_X2', 's3_X1', 's3_X2', 's3_X3', 's3_X3', 's4_X1',
-         's4_X2', 's4_X2', 's4_X3', 's4_X4'),
-  N2 = c('s2_X1', 's2_X2', 's3_X1', 's3_X2', 's3_X3', 's4_X1', 's4_X2', 's4_X3', 's4_X4', 'X1',
-         'X2', 'X5', 'X3', 'X4')) %>%
+  N1 = c('s1', 's1', 's2_X1', 's2_X2', 's2_X2', 's3_X1', 's3_X2', 's3_X3', 's3_X3'),
+  N2 = c('s2_X1', 's2_X2', 's3_X1', 's3_X2', 's3_X3', 'X1', 'X2', 'X3', 'X4')) %>%
   left_join(nodes %>% select(N2 = ID, Value, col))
 
 # combine and convert node and edge data into the riverplot format
-pd <- makeRiver(nodes %>% select(-Value), edges)
+riv_data <- makeRiver(nodes %>% select(-Value) %>% as.data.frame(), edges)
 
-# calculate correlation at the splitting branch
-rho3 <- cor(all_stats[all_stats$admixture=='s2',]$X2_b, 
-            all_stats[all_stats$admixture=='s3',]$X2_b + all_stats[all_stats$admixture=='s3',]$X3_b)
-rho4 <- cor(all_stats[all_stats$admixture=='s3',]$X3_b, 
-            all_stats[all_stats$admixture=='s4',]$X3_b + all_stats[all_stats$admixture=='s4',]$X4_b)
-rho5 <- cor(all_stats[all_stats$admixture=='s4',]$X2_b, 
-            all_stats[all_stats$admixture=='s5',]$X2_b + all_stats[all_stats$admixture=='s5',]$X5_b)
+# correlation at the splitting branch
+rho3 <- cor(all$s2$X2, all$s3$X2 + all$s3$X3)
+rho4 <- cor(all$s3$X3, all$s4$X3 + all$s4$X4)
 
 # left panel of figure 2: river plot
-plot(pd, plot_area = c(0.9,0.9), srt = 0, textcex = 0.8, node_margin = 0.3)
-text(0.3, -0.095, expression(italic('K')==2), xpd = NA)
-text(0.5, -0.095, expression(italic('K')==3), xpd = NA)
-text(0.5, -0.15, bquote(paste(rho['2,3'], ' = ', .(sprintf('%.2f', rho3)))), xpd = NA)
-text(0.7, -0.095, expression(italic('K')==4), xpd = NA)
-text(0.7, -0.15, bquote(paste(rho['3,4'], ' = ', .(sprintf('%.2f', rho4)))), xpd = NA)
-text(0.95, -0.095, expression(italic('K')==5), xpd = NA)
-text(0.95, -0.15, bquote(paste(rho['4,5'], ' = ', .(sprintf('%.2f', rho5)))), xpd = NA)
+plot(riv_data, plot_area = c(0.9,0.9), srt = 0, textcex = 0.8, node_margin = 0.3)
+text(0.36, -0.095, expression(italic('K')==2), xpd = NA)
+text(0.64, -0.095, expression(italic('K')==3), xpd = NA)
+text(0.64, -0.15, bquote(paste(rho['2,3'], ' = ', .(sprintf('%.2f', rho3)))), xpd = NA)
+text(0.92, -0.095, expression(italic('K')==4), xpd = NA)
+text(0.92, -0.15, bquote(paste(rho['3,4'], ' = ', .(sprintf('%.2f', rho4)))), xpd = NA)
 text(1.05, 0.94, expression(paste('(', italic('P')^IAM, ')')), cex = 0.8, xpd = NA)
 text(1.05, 0.8, expression(paste('(', italic('P')^EAS, ')')), cex = 0.8, xpd = NA)
-text(1.05, 0.66, expression(paste('(', italic('P')^MEA, ')')), cex = 0.8, xpd = NA)
-text(1.05, 0.38, expression(paste('(', italic('P')^EUR, ')')), cex = 0.8, xpd = NA)
+text(1.05, 0.45, expression(paste('(', italic('P')^EUR, ')')), cex = 0.8, xpd = NA)
 text(1.05, 0.09, expression(paste('(', italic('P')^AFR, ')')), cex = 0.8, xpd = NA)
 segments(-0.05, -0.05, 1.05, -0.05, xpd = NA)
-fig2_left <- recordPlot()
+riverplot <- recordPlot()
 
 # right panel of figure 2: cumulative probability
-fig2_right <- all$s5 %>%
-  select(aid, paste0('X',1:5), ipwgt) %>%
+fig2_right <- all$s4 %>%
+  select(aid, paste0('X',1:4), ipwgt) %>%
   filter(!is.na(ipwgt)) %>%
-  gather('anc','X',X1:X5) %>%
+  gather('anc','X',X1:X4) %>%
   group_by(anc) %>%
   arrange(anc, X) %>%
   mutate(n = cumsum(ipwgt),
@@ -1238,7 +1339,6 @@ fig2_right <- all$s5 %>%
                          anc=='X2' ~ 'EUR',
                          anc=='X3' ~ 'EAS',
                          anc=='X4' ~ 'IAM', 
-                         anc=='X5' ~ 'MEA',
                          T ~ NA) %>% factor(levels = ancestry_label2),
          frac = n/max(n)) %>%
   ggplot() +
@@ -1249,133 +1349,146 @@ fig2_right <- all$s5 %>%
   scale_x_continuous(expand = c(0,0), breaks = seq(0,1,0.25), limits = c(0,1)) +
   labs(x = bquote(italic(P)), y = 'Cumulative Probability', color = '') +
   scale_color_manual(values = c(AFR= '#ffc300', EUR = '#219ebc', EAS = '#a7c957',
-                                IAM = '#e76f51', MEA = '#6a4c93'),
+                                IAM = '#e76f51'),
                      labels = c(AFR = bquote(italic(P)^'AFR'), EUR = bquote(italic(P)^'EUR'),
-                                EAS = bquote(italic(P)^'EAS'), IAM = bquote(italic(P)^'IAM'),
-                                MEA = bquote(italic(P)^'MEA'))) +
+                                EAS = bquote(italic(P)^'EAS'), IAM = bquote(italic(P)^'IAM'))) +
   theme_custom() +
   theme(legend.position=c(0.9,0.15), legend.background = element_rect(fill='transparent'))
 
-ggsave('figures/figure2.pdf', width = 18, height = 6,
-       plot_grid(as_grob(fig2_left), as_grob(fig2_right), align = 'hv', nrow = 1, rel_heights = c(1,3)))
+ggsave(paste0('figures/figure2',fig_format), width = 18, height = 6,
+       plot_grid(as_grob(riverplot), as_grob(fig2_right), align = 'hv', nrow = 1, rel_heights = c(1,3)))
 
 
 # 3.2 Figure 3 (main text): skin color scatter plots
-d <- all$s5 %>%
+s4 <- all$s4 %>% mutate(region = region3 %>% factor())
+d <- s4 %>%
   filter(include_ssa==1) %>%
   mutate(region = 'Sub-Saharan Africa') %>%
-  rbind(all$s5 %>%
+  rbind(s4 %>%
           filter(include_america==1) %>%
           mutate(region = 'The Americas')) %>%
-  rbind(all$s5 %>%
+  rbind(s4 %>%
           filter(include_europe==1) %>%
           mutate(region = 'Europe')) %>%
-  rbind(all$s5 %>%
+  rbind(s4 %>%
           filter(include_eao==1) %>%
           mutate(region = 'Eastern Asia & Oceania')) %>%
-  rbind(all$s5 %>%
+  rbind(s4 %>%
           filter(include_mesa==1) %>%
           mutate(region = 'Middle East & South Asia')) %>%
   mutate(region = factor(region, levels = region_label[c(3,1,4,2,5)]))
 
-prepare_skin <- function(data, discrete = F) {
-  data <- data %>% filter(!is.na(region), !is.na(skin))
-  # ancestry-related inclusion criteria
-  data <- data %>% filter(X2>=0.01, X0>=0.01)
-  # region-related inclusion criteria
-  data <- data %>%
+prepare_skin <- function(data, X2_thresh, X0_thresh, both_thresh, discrete = T) {
+  lm_dat <- data %>% filter(!is.na(region), !is.na(skin))
+  # GSP-related inclusion criteria
+  lm_dat <- lm_dat %>% filter(X2>=X2_thresh, X0>=X0_thresh, X2+X0>=both_thresh)
+  # geographic ancestry-related inclusion criteria
+  lm_dat <- lm_dat %>%
     group_by(region) %>%
     mutate(regn = max(row_number())) %>%
     filter(regn>=110) %>%
     ungroup()
   
   if (discrete) {
-    dat <- data %>%
+    dat <- lm_dat %>%
       transmute(aid, region, include_ssa, include_america, include_europe,
                 sex, X0, skin)
-    rd <- dat %>%
+    dat <- dat %>%
       cbind(predict(dummyVars('~ skin', dat, sep = '_'), newdata = dat) %>% as.data.frame()) %>%
       gather(ytype, y, starts_with('skin_')) %>% 
       mutate(ytype = str_remove_all(ytype, 'skin_'))
   } else {
-    dat <- data %>% mutate(skin = 6 - as.numeric(skin))
+    lm_dat <- lm_dat %>% mutate(skin = 6 - as.numeric(skin))
     # modeling & residualization
     Xs <- names(data %>% select(starts_with('X')))
     lXs <- Xs[!Xs %in% c('X0','X2')] %>% paste(collapse = ' + ')
-    mx <- lm(paste('X0 ~', lXs), dat)
-    my <- lm(paste('skin ~', lXs), dat)
-    rd <- dat %>% 
+    mx <- lm(paste('X0 ~', lXs), lm_dat)
+    my <- lm(paste('skin ~', lXs), lm_dat)
+    dat <- lm_dat %>% 
       transmute(aid, region, include_ssa, include_america, include_europe,
-                sex, raw_x = X0, res_x = residuals(mx) + mean(dat$X0), res2_x = X0,
-                raw_y = skin, res_y = residuals(my) + mean(dat$skin), res2_y = res_y)
+                sex, raw_x = X0, res_x = residuals(mx) + mean(lm_dat$X0), res2_x = X0,
+                raw_y = skin, res_y = residuals(my) + mean(lm_dat$skin), res2_y = res_y)
   }
   
-  return(rd)
+  return(dat)
 }
 
 my_skin_plot <- function(discrete = F) {
   if (discrete) {
-    dat <- prepare_skin(d %>% rename(X0 = X1), T) %>%
+    fig3_data1 <- prepare_skin(d %>% rename(X0 = X1), 0.01, 0.01, -1, T) %>%
       mutate(anc = 'AFR') %>%
-      rbind(prepare_skin(d %>% rename(X0 = X4), T) %>%
+      rbind(prepare_skin(d %>% rename(X0 = X4), 0.01, 0.01, -1, T) %>%
               mutate(anc = 'IAM')) %>%
-      rbind(prepare_skin(d %>% rename(X0 = X5), T) %>%
-              mutate(anc = 'MEA')) %>%
-      mutate(anc = factor(anc, levels = ancestry_label2[-c(2:3)]), x = X0,
-             ytype = factor(ytype, levels = levels(d$skin))) %>%
+      mutate(anc = factor(anc, levels = ancestry_label2[-2]), x = X0,
+             ytype = factor(ytype, levels = levels(d$skin)),
+             # whether include in the main text figure
+             main = case_when(
+               anc=='AFR' & region %in% c('Sub-Saharan Africa', 'The Americas') ~ 1,
+               anc=='IAM' & region=='The Americas' ~ 1,
+               T ~ 0
+             )) %>%
       filter(ytype!='White', region %in% c('Sub-Saharan Africa', 'The Americas'))
     
-    texty <- 0.94
+    texty <- 0.9
     rugy <- 1.01
     rugyend <- 1.05
-    yintercept <- seq(0, 1, 0.25)
+    yintercept <- seq(0,1,0.25)
     ylabel <- 'Fraction with a given skin tone (or darker)'
-    ylimit <- c(0, 1.05)
-    ybreaks <- seq(0.25, 1, 0.25)
+    ylimit <- c(0,1.05)
+    ybreaks <- seq(0.25,1,0.25)
     linetype <- 'Interviewer-Rated Skin Tone'
   } else {
-    dat <- prepare_skin(d %>% filter(region=='Sub-Saharan Africa') %>% rename(X0 = X1), F) %>%
+    fig3_data1 <- prepare_skin(d %>% filter(region=='Sub-Saharan Africa') %>% 
+                                 rename(X0 = X1), 0.01, 0.01, -1, F) %>%
       mutate(anc = 'AFR') %>%
-      rbind(prepare_skin(d %>% filter(region=='The Americas') %>% rename(X0 = X1), F) %>%
+      rbind(prepare_skin(d %>% filter(region=='The Americas') %>%
+                           rename(X0 = X1), 0.01, 0.01, -1, F) %>%
               mutate(anc = 'AFR')) %>%
-      rbind(prepare_skin(d %>% filter(region=='The Americas') %>% rename(X0 = X4), F) %>%
+      rbind(prepare_skin(d %>% filter(region=='The Americas') %>%
+                           rename(X0 = X4), 0.01, 0.01, -1, F) %>%
               mutate(anc = 'IAM')) %>%
       pivot_longer(
         cols = ends_with(c('_x', '_y')),
         names_to = c('ytype', '.value'),
         names_pattern = '(.*)_(.*)'
       ) %>%
-      mutate(anc = factor(anc, levels = ancestry_label2[-c(2:3)]),
+      mutate(main = 1, anc = factor(anc, levels = ancestry_label2[-2]),
              ytype = factor(ytype, levels = c('raw','res','res2'), 
                             labels = c('Raw','Residualized','Residualized2')))
     
     texty <- 4.5
     rugy <- 5.1
     rugyend <- 5.5
-    yintercept <- seq(0, 5, 0.5)
+    yintercept <- seq(0,5,0.5)
     ylabel <- 'Skin tone'
-    ylimit <- c(0, 5.5)
-    ybreaks <- seq(0.5, 5, 0.5)
+    ylimit <- c(0,5.5)
+    ybreaks <- seq(0.5,5,0.5)
     linetype <- 'Version'
   }
   
   # data for region-specific sample size & significance  
-  pd1 <- dat %>% 
-    group_by(anc, region, ytype) %>%
+  fig3_dat1 <- fig3_data1 %>% 
+    group_by(anc, region, main, ytype) %>%
     summarise(n = max(row_number())) %>%
     group_by(anc, ytype) %>%
     mutate(
-      x = ifelse(region=='Sub-Saharan Africa' & anc!='AFR', 0.62, 0.02), y = texty,
-      n = paste0(region, ':\nN = ', n),
-      rowno = ifelse(region=='The Americas', 2, 1)
+      x = case_when(region=='Sub-Saharan Africa' & anc!='AFR' ~ 0.78, 
+                    discrete ~ 0.18,
+                    T ~ 0.02),
+      y = texty,
+      n = paste0('Self-Reported Ancestral',
+                 ifelse(discrete,'\n',' '),
+                 ifelse(region=='Sub-Saharan Africa','Sub-Saharan Africans','Americans'),
+                 '\n(N = ', n, ')'),
+      rowno = ifelse(region=='The Americas',2,1)
     ) %>%
     ungroup() %>%
     select(-ytype) %>%
     unique()
-  dat <- dat %>% left_join(pd1 %>% select(anc, region, rowno))
+  fig3_data1 <- fig3_data1 %>% left_join(fig3_dat1 %>% select(anc, region, rowno))
   
   # data for plotting binned dots
-  pd2 <- dat %>%
+  fig3_dat2 <- fig3_data1 %>%
     group_by(anc, region, rowno, ytype) %>%
     arrange(anc, region, rowno, ytype, x) %>%
     group_modify(~{
@@ -1385,31 +1498,32 @@ my_skin_plot <- function(discrete = F) {
       .x$bin <- ifelse(is.na(.x$bin),1,.x$bin)
       return(.x)
     }) %>%
-    group_by(anc, region, rowno, ytype, bin) %>%
+    group_by(anc, region, main, rowno, ytype, bin) %>%
     summarise(across(c(x,y), function(v) v = mean(v))) %>%
     ungroup()
   
   if (discrete) {
-    pd2 <- pd2 %>%
+    fig3_dat2 <- fig3_dat2 %>%
       group_by(anc, region, rowno, bin) %>%
       mutate(y = cumsum(y))
   }
   
   # data for loess lines using unbinned points
-  pd3 <- dat %>%
-    left_join(pd2 %>% group_by(anc, region) %>% summarise(x_end = max(x)))
+  fig3_dat3 <- fig3_data1 %>%
+    left_join(fig3_dat2 %>% group_by(anc, region) %>% summarise(x_end = max(x)))
   
   if (discrete) {
-    pd3 <- pd3 %>%
+    fig3_dat3 <- fig3_dat3 %>%
       group_by(aid, anc, region, rowno) %>%
       arrange(aid, anc, region, rowno, ytype) %>%
       mutate(y = cumsum(y))
   }
   
-  pd3 <- pd3 %>%
+  fig3_dat3 <- fig3_dat3 %>%
     group_by(anc, region, rowno, ytype) %>%
     group_modify(~{
       # fit loess lines
+      ## degree: the degree of the polynomials to be used; span: the degree of smoothing
       m <- loess(y ~ x, data = .x, span = 0.8, degree = 1)
       # get fitted y values
       .x$hat_y <- predict(m)
@@ -1419,14 +1533,14 @@ my_skin_plot <- function(discrete = F) {
     ungroup()
   
   if (discrete) {
-    p <- ggplot() +
-      geom_point(data = pd2, show.legend = F,
+    ggplot() +
+      geom_point(data = fig3_dat2, show.legend = F,
                  aes(x = x, y = y, color = region, shape = ytype), size = 2, alpha = 0.4) +
-      geom_line(data = pd3, 
+      geom_line(data = fig3_dat3, 
                 aes(x = x, y = hat_y, color = region, linetype = ytype), linewidth = 1) +
-      geom_text(data = pd1, 
-                aes(x = x, y = y, label = n, color = region), show.legend = F, hjust = 0, size = 3.5) +
-      geom_segment(data = dat %>% select(-ytype) %>% unique(), 
+      geom_text(data = fig3_dat1, 
+                aes(x = x, y = y, label = n, color = region), show.legend = F, size = 3.5) +
+      geom_segment(data = fig3_data1 %>% select(-ytype) %>% unique(), 
                    aes(x = x, xend = x, y = 1.01, yend = 1.05, color = region), alpha = 0.1) + 
       geom_hline(yintercept = seq(0,1,0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
       geom_vline(xintercept = seq(0,1,0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
@@ -1434,23 +1548,25 @@ my_skin_plot <- function(discrete = F) {
       scale_y_continuous(name = 'Fraction with a given skin tone (or darker)', limit = c(0,1.05), breaks = seq(0.25,1,0.25), expand = c(0,0)) +
       facet_grid(region ~ anc, switch = 'x', labeller = label_bquote(cols = bold(italic(P)^.(as.character(anc))))) +
       scale_color_manual(name = 'Self-Reported Geographic Ancestry', 
-                         values = c(`The Americas`='#dd0426', `Sub-Saharan Africa`='#f9a620')) +
+                         values = c(`The Americas`='#dd0426', `Sub-Saharan Africa`='#f9a620'),
+                         labels = c(`The Americas`='Ancestral Americans', 
+                                    `Sub-Saharan Africa`='Ancestral Sub-Saharan Africans')) +
       scale_shape_manual(name = 'Interviewer-Rated Skin Tone', values = c(0,1,2,5)) +
       scale_linetype_manual(name = 'Interviewer-Rated Skin Tone', values = c(1,3,2,6)) +
       theme_custom() +
       theme(legend.position = 'top', legend.box = 'vertical', legend.spacing.y = unit(0.05,'cm'),
             strip.text.y = element_blank(), strip.placement = 'outside')
   } else {
-    p <- ggplot() +
-      geom_point(data = pd2 %>% filter(ytype=='Residualized'), show.legend = F,
+    ggplot() +
+      geom_point(data = fig3_dat2 %>% filter(main==1, ytype=='Residualized'), show.legend = F,
                  aes(x = x, y = y, color = region), shape = 15, size = 2) +
-      geom_point(data = dat %>% filter( ytype=='Residualized'), show.legend = F,
+      geom_point(data = fig3_data1 %>% filter(main==1, ytype=='Residualized'), show.legend = F,
                  aes(x = x, y = y, color = region), shape = 1, size = 2, alpha = 0.1) +
-      geom_line(data = pd3 %>% filter(ytype=='Residualized'),
+      geom_line(data = fig3_dat3 %>% filter(main==1, ytype=='Residualized'),
                 aes(x = x, y = hat_y, color = region), linewidth = 1) +
-      geom_text(data = pd1, 
+      geom_text(data = fig3_dat1 %>% filter(main==1), 
                 aes(x = x, y = y, label = n, color = region), show.legend = F, hjust = 0, size = 3.5) +
-      geom_segment(data = dat %>% select(-ytype) %>% unique(), 
+      geom_segment(data = fig3_data1 %>% filter(main==1) %>% select(-ytype) %>% unique(), 
                    aes(x = x, xend = x, y = rugy, yend = rugyend, color = region), alpha = 0.1) + 
       geom_hline(yintercept = yintercept, color = 'gray', linetype = 'dotted', linewidth = 0.3) +
       geom_vline(xintercept = seq(0,1,0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
@@ -1459,20 +1575,22 @@ my_skin_plot <- function(discrete = F) {
       facet_wrap(rowno ~ anc, scales = 'free', strip.position = 'bottom', 
                  labeller = label_bquote(cols = bold(italic(P)^.(as.character(anc))))) +
       scale_color_manual(name = 'Self-Reported Geographic Ancestry', 
-                         values = c(`The Americas`='#dd0426', `Sub-Saharan Africa`='#f9a620')) +
+                         values = c(`The Americas`='#dd0426', `Sub-Saharan Africa`='#f9a620'),
+                         labels = c(`The Americas`='Ancestral Americans', 
+                                    `Sub-Saharan Africa`='Ancestral Sub-Saharan Africans')) +
       theme_custom() +
       theme(legend.position = 'top', legend.box = 'vertical', legend.spacing.y = unit(0.05,'cm'),
             strip.text.y = element_blank(), strip.placement = 'outside')
   }
-  
-  return(p)
 }
 
-# Figure 10 (appendix): skin tone as discrete
-ggsave('figures/appendix_figure10.pdf', my_skin_plot(T), width = 12, height = 8)
-
 # Figure 3 (main text): skin tone as continuous
-ggsave('figures/figure3.pdf', my_skin_plot(F), width = 12, height = 5)
+my_skin_plot(F)
+ggsave(paste0('figures/figure3',fig_format), width = 12, height = 5)
+
+# Figure 17 (appendix): skin tone as discrete
+my_skin_plot(T)
+ggsave(paste0('figures/appendix_ordinal_figure3',fig_format), width = 10, height = 8)
 
 
 # 3.3 Figure 4 (main text): self-reported, interviewer-classified race, & skin color
@@ -1511,8 +1629,11 @@ prepare_irace <- function(data, ga_sample) {
     ungroup() %>%
     transmute(skin, skin_prop = n/sum(n), skin_label = paste0(skin,' (',round(skin_prop*100),'%)'),
               y = Estimate, se = `Std. Error`, lower = `CI Lower`, upper = `CI Upper`,
-              y_label = y_label, sample = ga_sample, sample_label = paste0(sample,'\n(N = ',sum(n),')'))
-
+              y_label = y_label, sample = ga_sample, 
+              sample_label = case_when(sample=='Sub-Saharan Africa' ~ 'Sub-Saharan Africans',
+                                       sample=='The Americas' ~ 'Americans'),
+              sample_label = paste0('Self−Reported Ancestral\n', sample_label, '\n(N = ',sum(n),')'))
+  
   return(rd)
 }
 
@@ -1534,8 +1655,8 @@ prepare_irace_bygsp <- function(data, ga_sample, focal_gsp) {
   
   # residualize the focal genetic similarity proportion on the others
   data <- data %>% filter(region==ga_sample)
-  covX <- setdiff(paste0('X',c(1,3:5)), focal_gsp)
-  unique_data <- data %>% select(aid, paste0('X',1:5)) %>% unique()
+  covX <- setdiff(paste0('X',c(1,3:4)), focal_gsp)
+  unique_data <- data %>% select(aid, paste0('X',1:4)) %>% unique()
   mx <- lm(as.formula(paste(focal_gsp, '~', paste(covX, collapse = ' + '))), unique_data)
   unique_data$res_X0 <- mx$residuals + mean(unique_data[[focal_gsp]])
   data <- data %>% left_join(unique_data %>% select(aid, res_X0))
@@ -1573,7 +1694,7 @@ prepare_irace_bygsp <- function(data, ga_sample, focal_gsp) {
         return(rd)
       })
   }
-
+  
   dat <- dat %>%
     transmute(skin = str_remove(skin, 'skin'), y = Estimate, se = `Std. Error`,
               lower = `CI Lower`, upper = `CI Upper`, df.residual) %>%
@@ -1591,13 +1712,15 @@ prepare_irace_bygsp <- function(data, ga_sample, focal_gsp) {
            t_stat = diff_coef/se_diff) %>%
     rowwise() %>%
     mutate(pvalue = 2*pt(abs(t_stat), df = min(df.residual0, df.residual1), lower.tail = F))
-
+  
   rd <- dat %>%
     left_join(dat2 %>% select(skin, pvalue)) %>%
     group_by(lmedian) %>%
     transmute(skin, skin_prop = n/sum(n), skin_label = paste0(skin,' (',round(skin_prop*100),'%)'),
               y, se, upper, lower, y_label = y_label, sample = ga_sample, 
-              sample_label = paste0(sample,'\n(N = ',sum(n),')'), 
+              sample_label = case_when(sample=='Sub-Saharan Africa' ~ 'Sub-Saharan Africans',
+                                       sample=='The Americas' ~ 'Americans'),
+              sample_label = paste0('Self−Reported Ancestral\n', sample_label, '\n(N = ',sum(n),')'), 
               pvalue = case_when(
                 pvalue<0.001 ~ '***',
                 pvalue>=0.001 & pvalue<0.01 ~ '**',
@@ -1630,7 +1753,7 @@ pd3 <- pd2 %>%
   transmute(panel, sample, skin_label2, y, pvalue, lmedian = 0) %>%
   unique() %>%
   filter(!pvalue %in% c('.',''))
-  
+
 my_irace_plot <- function(ga_sample, panel_num) {
   if (ga_sample=='Sub-Saharan Africa') {
     y_label <- 'Fraction classified as Black'
@@ -1649,50 +1772,49 @@ my_irace_plot <- function(ga_sample, panel_num) {
   } else {
     print('No such specification available.')
   }
-
-   p <- pd2 %>%
-     filter(sample==ga_sample, panel==panel_num) %>%
-      ggplot(aes(x = skin_label2, y = y, fill = as.factor(1-lmedian))) +
-      geom_bar(stat = 'identity', position = 'dodge') +
-      geom_text(aes(y = lower, label = sprintf('%.2f',y)), position = position_dodge(0.9), vjust = 1.5) +
-      geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, position = position_dodge(0.9)) +
-      geom_text(data = pd2 %>% filter(sample==ga_sample, panel==panel_num, grepl('White', skin)),
-                aes(y = 1.1, label = sample_label2)) +
-      geom_text(data = pd3 %>% filter(sample==ga_sample, panel==panel_num),
-                aes(label = pvalue), color = '#bf0603', show.legend = FALSE) +
-      scale_y_continuous(name = y_label, expand = c(0,0), breaks = seq(0,1,0.25)) +
-      coord_cartesian(ylim = c(0, 1.2)) + 
-      scale_x_discrete(name = '') +
-      scale_fill_manual(name = bquote(italic('P')^.(anc)),
-                        values = c(`0`= rgb(col2rgb(color)[1]/255, col2rgb(color)[2]/225, col2rgb(color)[3]/225, alpha = 0.4), `1`=color),
-                        labels = c(`0`='< median', `1`='>=median')) +
-      theme_custom() +
-      theme(legend.position = 'top')
-   
-   return(p)
+  
+  p <- pd2 %>%
+    filter(sample==ga_sample, panel==panel_num) %>%
+    ggplot(aes(x = skin_label2, y = y, fill = as.factor(1-lmedian))) +
+    geom_bar(stat = 'identity', position = 'dodge') +
+    geom_text(aes(y = lower, label = sprintf('%.2f',y)), position = position_dodge(0.9), vjust = 1.5) +
+    geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, position = position_dodge(0.9)) +
+    geom_text(data = pd2 %>% filter(sample==ga_sample, panel==panel_num, grepl('White', skin)),
+              aes(y = 1, label = sample_label2), size = 3.6) +
+    geom_text(data = pd3 %>% filter(sample==ga_sample, panel==panel_num),
+              aes(label = pvalue), color = '#bf0603', show.legend = FALSE) +
+    scale_y_continuous(name = y_label, expand = c(0,0), breaks = seq(0,1,0.25)) +
+    coord_cartesian(ylim = c(0, 1.2)) + 
+    scale_x_discrete(name = '') +
+    scale_fill_manual(name = bquote(italic('P')^.(anc)),
+                      values = c(`0`= rgb(col2rgb(color)[1]/255, col2rgb(color)[2]/225, col2rgb(color)[3]/225, alpha = 0.4), `1`=color),
+                      labels = c(`0`='< median', `1`='>=median')) +
+    theme_custom() +
+    theme(legend.position = 'top')
+  
+  return(p)
 }
 
 ggsave('figures/figure4.pdf', width = 8, height = 12,
        plot_grid(my_irace_plot('Sub-Saharan Africa',1), my_irace_plot('The Americas',2), 
                  my_irace_plot('The Americas',3), nrow = 3))
 
-# Figure 11 (appendix): racial classification by skin tone
+# Figure 19 (appendix): racial classification by skin tone
 pd %>%
   ggplot(aes(x = skin_label, y = y)) +
   geom_bar(stat = 'identity') +
   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
-  geom_text(data = pd %>% filter(grepl('White', skin)), aes(y = 1.1, label = sample_label)) +
+  geom_text(data = pd %>% filter(grepl('White', skin)), 
+            aes(y = 1, label = sample_label), size = 3.6) +
   facet_wrap(~ sample, nrow = 2, strip.position = 'left', scales='free',
-             labeller = as_labeller(c(`Self-reported Black` = 'Fraction classified as Black',
-                                      `Self-reported Hispanic` = 'Fraction classified as non-White',
-                                      `Sub-Saharan Africa` = 'Fraction classified as Black',
+             labeller = as_labeller(c(`Sub-Saharan Africa` = 'Fraction classified as Black',
                                       `The Americas` = 'Fraction classified as non-White'))) +
   scale_y_continuous(name = '', expand = c(0,0), breaks = seq(0,1,0.25), limits = c(0,1.2)) +
   scale_x_discrete(name = '') +
   theme_custom() +
   theme(strip.background = element_blank(),
         strip.placement = 'outside')
-ggsave('figures/appendix_figure11.pdf', width = 8, height = 8)
+ggsave('figures/appendix_nogsp_figure4.pdf', width = 8, height = 8)
 
 
 # 3.4 Figure 2 (appendix): branching structure of unsupervised K = 2 ~ 6
@@ -1701,7 +1823,7 @@ for (k in 2:6) {
   colnames(us[[paste0('us',k)]])[1:k] <- paste0('us', k, '_', colnames(us[[paste0('us',k)]])[1:k])
 }
 
-pd <- us$us2 %>%
+dat_us <- us$us2 %>%
   select(aid, region3, starts_with('us2_')) %>%
   left_join(us$us3 %>% select(aid, starts_with('us3_'))) %>%
   left_join(us$us4 %>% select(aid, starts_with('us4_'))) %>%
@@ -1712,52 +1834,53 @@ pd <- us$us2 %>%
                            T ~ region3),
          color = factor(color, levels = c(region_label, 'USA, Canada, & Unknown'))) 
 
-p1 <- my_scatter_rug_plot(pd %>% rename(x = us2_X2, y = sum1), expression(atop(italic(P)^2,(italic(K)==2))),
+p1 <- my_scatter_rug_plot(dat_us %>% rename(x = us2_X2, y = sum1), expression(atop(italic(P)^2,(italic(K)==2))),
                           expression(atop(italic(P)^2 + italic(P)^3,(italic(K)==3))), F)
-p2 <- my_scatter_rug_plot(pd %>% rename(x = us3_X3, y = sum2), expression(atop(italic(P)^3,(italic(K)==3))),
+p2 <- my_scatter_rug_plot(dat_us %>% rename(x = us3_X3, y = sum2), expression(atop(italic(P)^3,(italic(K)==3))),
                           expression(atop(italic(P)^3 + italic(P)^4,(italic(K)==4))), F)
-p3 <- my_scatter_rug_plot(pd %>% rename(x = us4_X2, y = sum3), expression(atop(italic(P)^2,(italic(K)==4))),
+p3 <- my_scatter_rug_plot(dat_us %>% rename(x = us4_X2, y = sum3), expression(atop(italic(P)^2,(italic(K)==4))),
                           expression(atop(italic(P)^2 + italic(P)^5,(italic(K)==5))), F)
-p4 <- my_scatter_rug_plot(pd %>% rename(x = us5_X3, y = sum4), expression(atop(italic(P)^3,(italic(K)==5))),
+p4 <- my_scatter_rug_plot(dat_us %>% rename(x = us5_X3, y = sum4), expression(atop(italic(P)^3,(italic(K)==5))),
                           expression(atop(italic(P)^3 + italic(P)^6,(italic(K)==6))), T)
-ggsave('figures/appendix_figure2.pdf', width = 12, height = 10, plot_grid(p1,p2,p3,p4, ncol = 2))
+ggsave(paste0('figures/appendix_usadmx_branching',fig_format), plot_grid(p1,p2,p3,p4, ncol = 2),
+       width = 12, height = 10)
 
 
-# 3.5 Figure 3 (appendix): comparing supervised and unsupervised K = 5 estimates
-pd <- all$us5 %>%
-  select(aid, region3, paste0('X',1:5)) %>%
-  rename_with(~ paste0('us5_',.), paste0('X',1:5)) %>%
-  left_join(all$s5 %>%
-              select(aid, paste0('X',1:5)) %>%
-              rename_with(~ paste0('s5_',.), paste0('X',1:5))) %>%
+# 3.5 Figure 3 (appendix): comparing supervised and unsupervised K = 4 estimates
+k4 <- all[c('us4', 's4')]
+colnames(k4$us4)[1:4] <- paste0('us4_', colnames(k4$us4)[1:4])
+colnames(k4$s4)[1:4] <- paste0('s4_', colnames(k4$s4)[1:4])
+
+dat_k4 <- k4$us4 %>%
+  select(aid, region3, starts_with('us4_')) %>%
+  left_join(k4$s4 %>% select(aid, starts_with('s4_'))) %>%
   mutate(color = case_when(is.na(region3)|region3=='USA & Canada' ~ 'USA, Canada, & Unknown',
                            T ~ region3),
          color = factor(color, levels = c(region_label, 'USA, Canada, & Unknown')))
 
-p1 <- my_scatter_rug_plot(pd %>% select(x = s5_X1, y = us5_X1, color),
+p1 <- my_scatter_rug_plot(dat_k4 %>% select(x = s4_X1, y = us4_X1, color),
                           expression(italic(P)^AFR), expression(italic(P)^1), F)
-p2 <- my_scatter_rug_plot(pd %>% select(x = s5_X2, y = us5_X2, color),
+p2 <- my_scatter_rug_plot(dat_k4 %>% select(x = s4_X2, y = us4_X2, color),
                           expression(italic(P)^EUR), expression(italic(P)^2), F)
-p3 <- my_scatter_rug_plot(pd %>% select(x = s5_X3, y = us5_X3, color),
+p3 <- my_scatter_rug_plot(dat_k4 %>% select(x = s4_X3, y = us4_X3, color),
                           expression(italic(P)^EAS), expression(italic(P)^3), F)
-p4 <- my_scatter_rug_plot(pd %>% select(x = s5_X4, y = us5_X4, color),
-                          expression(italic(P)^IAM), expression(italic(P)^4), F)
-p5 <- my_scatter_rug_plot(pd %>% select(x = s5_X5, y = us5_X5, color),
-                          expression(italic(P)^MEA), expression(italic(P)^5), T)
-ggsave('figures/appendix_figure3.pdf', plot_grid(p1,p2,p3,p4,p5, nrow = 3), width = 12, height = 18)
+p4 <- my_scatter_rug_plot(dat_k4 %>% select(x = s4_X4, y = us4_X4, color),
+                          expression(italic(P)^IAM), expression(italic(P)^4), T)
+ggsave(paste0('figures/appendix_compare_svsus',fig_format), plot_grid(p1,p2,p3,p4, nrow = 2),
+       width = 12, height = 10)
 
 
-# 3.6 Figure 4 (appendix): distribution of the 5 GSP variables in the US
-all$s5 %>%
-  gather(anc, X, X1:X5) %>%
+# 3.6 Figure 5 (appendix): distribution of the 4 GSP variables in the US
+s4 %>%
+  gather(anc, X, paste0('X',1:4)) %>%
   mutate(anc = case_when(
-    anc=='X1' ~ 'AFR', anc=='X2' ~ 'EUR', anc=='X3' ~ 'EAS', anc=='X4' ~ 'IAM', anc=='X5' ~ 'MEA',
+    anc=='X1' ~ 'AFR', anc=='X2' ~ 'EUR', anc=='X3' ~ 'EAS', anc=='X4' ~ 'IAM',
     T ~ NA
-  ) %>% factor(levels = c('AFR','EAS','IAM','EUR','MEA'))) %>%
+  ) %>% factor(levels = c('AFR','EAS','IAM','EUR'))) %>%
   ggplot() +
   geom_histogram(aes(x = X, y = 0.05*..density.., fill = anc, weight = ipwgt),
                  binwidth = 0.05, color = 'gray60', center = 0.025) +
-  facet_wrap(~ anc, ncol = 3, scale = 'free', strip.position = 'bottom', 
+  facet_wrap(~ anc, nrow = 2, scale = 'free', strip.position = 'bottom', 
              labeller = label_bquote(cols = bold(italic(P)^.(as.character(anc))))) +
   scale_x_continuous('', expand = c(0,0), limit = c(0,1), breaks = seq(0,1,0.1)) +
   scale_y_continuous(, expand = c(0,0), breaks = seq(0,1,0.1)) +
@@ -1767,63 +1890,153 @@ all$s5 %>%
       T ~ scale_y_continuous(expand = c(0,0), limits = c(0,0.6), breaks = seq(0,0.6,0.1))
     )
   ) +
-  scale_fill_manual(name = '', values = c(AFR = '#ffc300', EUR = '#219ebc', EAS = '#a7c957',
-                                          IAM = '#e76f51', MEA = '#6a4c93'),
+  scale_fill_manual(name = '', values = c(AFR = '#ffc300', EUR = '#219ebc', 
+                                          EAS = '#a7c957', IAM = '#e76f51'),
                     labels = c(AFR = bquote(italic(P)^'AFR'), EUR = bquote(italic(P)^'EUR'),
-                               EAS = bquote(italic(P)^'EAS'), IAM = bquote(italic(P)^'IAM'),
-                               MEA = bquote(italic(P)^'MEA'))) +
+                               EAS = bquote(italic(P)^'EAS'), IAM = bquote(italic(P)^'IAM'))) +
   labs(y = 'Fraction of Weighted Sample') +
   theme_custom() +
   theme(legend.position = 'top', legend.box = 'vertical', legend.spacing.y = unit(0.05,'cm'),
         strip.text.y = element_blank(), strip.placement = 'outside')
-ggsave('figures/appendix_figure4.pdf', width = 9, height = 6)
+ggsave(paste0('figures/appendix_gsp_histo',fig_format), width = 6, height = 6)
 
 
-# 3.7 Figure 5 (appendix): compare ADMIXTURE and Gnomix estimates
-pd <- all$s5 %>%
-  gather(anc, P1, X1:X5) %>%
+# 3.7 Figure 7 (appendix): supervised K = 4 stacked bar plots by region
+my_admx_plot(all$s4 %>% select(-subregion, -region) %>% rename(subregion = subregion2, region = region3),
+             c('Europe', 'The Americas', 'Sub-Saharan Africa', 'Eastern Asia & Oceania'), 
+             by_EUR = T, c('EUR', 'EAS', 'IAM', 'AFR'))
+ggsave(paste0('figures/appendix_admixture_plot_multi',fig_format), width = 16, height = 25)
+
+
+# 3.8 Figure 8 (appendix): separate figure for Middle East & Southern Asia 
+my_admx_plot(all$s4 %>% select(-subregion, -region) %>% rename(subregion = subregion2, region = region3),
+             'Middle East & Southern Asia', by_EUR = T, c('EUR', 'EAS', 'IAM', 'AFR'))
+ggsave(paste0('figures/appendix_admixture_plot_mesa',fig_format), width = 16, height = 5)
+
+
+# 3.9 Figure 9 (appendix): separate figure for all best-ancestry US/Canada before recategorization
+my_admx_plot(all$s4, 'USA & Canada', by_EUR = T, c('EUR', 'EAS', 'IAM', 'AFR'))
+ggsave(paste0('figures/appendix_admixture_plot_usacanada',fig_format), width = 16, height = 5)
+
+
+# 3.10 Figure 10 (appendix): compare ADMIXTURE and Gnomix estimates
+genanc <- s4 %>%
+  gather(anc, P1, paste0('X',1:4)) %>%
   mutate(anc = case_when(
-    anc=='X1' ~ 'AFR', anc=='X2' ~ 'EUR', anc=='X3' ~ 'EAS', anc=='X4' ~ 'IAM', anc=='X5' ~ 'MEA',
+    anc=='X1' ~ 'AFR', anc=='X2' ~ 'EUR', anc=='X3' ~ 'EAS', anc=='X4' ~ 'IAM',
     T ~ NA
   )) %>%
   transmute(aid, FID, IID, anc, P1) %>%
-  left_join(gnomix_s5 %>%
+  left_join(readRDS('dp_gsp.rds') %>% # from another project
               transmute(FID, IID, anc = X, P2 = P)) %>%
   mutate(anc = factor(anc, levels = ancestry_label2))
 
-pd2 <- pd %>%
+genanc_cor <- genanc %>%
   group_by(anc) %>%
   summarise(cor = cor(P1,P2)) %>%
   mutate(x = 0.02, y = 0.98, label = paste0('rho ~ "=" ~"', sprintf('%.3f', cor),'"'))
 
-pd %>%
+genanc %>%
   ggplot(aes(x = P1, y = P2, color = anc)) +
   geom_point(shape = 1, size = 2, stroke = 1, alpha = 0.4) +
   geom_smooth(method = 'lm', color = 'black') +
-  geom_text(data = pd2, aes(x = x, y = y, label = label), color = 'black', hjust = 0, parse = T) +
+  geom_text(data = genanc_cor, aes(x = x, y = y, label = label), color = 'black', hjust = 0, parse = T) +
   geom_abline(linetype = 'dashed', color = 'gray75') +
   facet_wrap(~ anc, labeller = label_bquote(cols = bold(italic(P)^.(as.character(anc))))) +
   scale_color_manual(values = c(AFR = '#ffc300', EUR = '#219ebc', EAS = '#a7c957',
-                                IAM = '#e76f51', MEA = '#6a4c93')) +
+                                IAM = '#e76f51')) +
   labs(x = 'ADMIXTURE', y = 'Gnomix') +
   theme_custom() +
   theme(legend.position = 'none')
-ggsave('figures/appendix_figure5.pdf', width = 9, height = 6)
+ggsave(paste0('figures/appendix_gsp_robust_gnomix',fig_format), width = 6, height = 6)
 
 
-# 3.8 Figure 7 (appendix): supervised K = 5 stacked bar plots by region
-my_admx_plot(all$s5 %>% mutate(subregion = subregion2, region = region3),
-             c('Europe', 'The Americas', 'Sub-Saharan Africa', 'Eastern Asia & Oceania'))
-ggsave('figures/appendix_figure7.pdf', width = 16, height = 25)
+# 3.11 Figure 11 (appendix): comparing supervised K = 4 estimates derived using different references
+dat_s4 <- readRDS('supervised4_limitedref.rds') %>%
+  rename_with(~ paste0('old_',.), starts_with('X')) %>%
+  left_join(all$s4 %>% select(aid, FID, IID, region3)) %>%
+  left_join(readRDS('supervised_output.rds')$s4 %>% 
+              mutate(across(c('FID','IID'), as.character))) %>%
+  mutate(color = case_when(is.na(region3)|region3=='USA & Canada' ~ 'USA, Canada, & Unknown',
+                           T ~ region3),
+         color = factor(color, levels = c(region_label, 'USA, Canada, & Unknown')))
+
+p1 <- my_scatter_rug_plot(dat_s4 %>% select(x = old_X1, y = X1, color),
+                          expression(atop(italic(P)^AFR, '(Limited reference)')), 
+                          expression(atop(italic(P)^AFR, '(Full reference)')), F)
+p2 <- my_scatter_rug_plot(dat_s4 %>% select(x = old_X2, y = X2, color),
+                          expression(atop(italic(P)^EUR, '(Limited reference)')), 
+                          expression(atop(italic(P)^EUR, '(Full reference)')), F)
+p3 <- my_scatter_rug_plot(dat_s4 %>% select(x = old_X3, y = X3, color),
+                          expression(atop(italic(P)^EAS, '(Limited reference)')), 
+                          expression(atop(italic(P)^EAS, '(Full reference)')), F)
+p4 <- my_scatter_rug_plot(dat_s4 %>% select(x = old_X4, y = X4, color),
+                          expression(atop(italic(P)^IAM, '(Limited reference)')), 
+                          expression(atop(italic(P)^IAM, '(Full reference)')), T)
+ggsave(paste0('figures/appendix_gsp_robust_ref',fig_format), plot_grid(p1,p2,p3,p4, nrow = 2),
+       width = 12, height = 12)
 
 
-# 3.9 Figure 8 (appendix): separate admixture plot for Middle East & Southern Asia 
-my_admx_plot(all$s5 %>% mutate(subregion = subregion2, region = region3),
-             'Middle East & Southern Asia')
-ggsave('figures/appendix_figure8.pdf', width = 16, height = 5)
+# 3.12 Figure 13 (appendix): comparing with unsupervised K = 4 estimates derived using 2 equal-sized subsamples
+dat_us5 <- all$us4 %>%
+  select(aid, FID, IID, region3, paste0('X',1:4)) %>%
+  rename_with(~ paste0('all_',.), starts_with('X')) %>%
+  right_join(readRDS('unsupervised_subsample_output_k4.rds') %>% 
+               bind_rows(.id = 'run') %>% 
+               mutate(across(c('FID','IID'), as.character))) %>%
+  mutate(color = case_when(is.na(region3)|region3=='USA & Canada' ~ 'USA, Canada, & Unknown',
+                           T ~ region3),
+         color = factor(color, levels = c(region_label, 'USA, Canada, & Unknown'))) %>%
+  filter(type=='estimation')
+
+p1 <- my_scatter_rug_plot(dat_us5 %>% select(x = all_X1, y = X1, color),
+                          expression(atop(italic(P)^1, '(Full sample)')),
+                          expression(atop(italic(P)^1, '(50% subsample)')), F)
+p2 <- my_scatter_rug_plot(dat_us5 %>% select(x = all_X2, y = X2, color),
+                          expression(atop(italic(P)^2, '(Full sample)')),
+                          expression(atop(italic(P)^2, '(50% subsample)')), F)
+p3 <- my_scatter_rug_plot(dat_us5 %>% select(x = all_X3, y = X3, color),
+                          expression(atop(italic(P)^3, '(Full sample)')),
+                          expression(atop(italic(P)^3, '(50% subsample)')), F)
+p4 <- my_scatter_rug_plot(dat_us5 %>% select(x = all_X4, y = X4, color),
+                          expression(atop(italic(P)^4, '(Full sample)')),
+                          expression(atop(italic(P)^4, '(50% subsample)')), T)
+
+plot_grid(p1,p2,p3,p4, nrow = 2)
+ggsave('figures/appendix_gsp_robust_uns.pdf', width = 12, height = 12)
 
 
-# 3.10 Figure 9 (appendix): separate admixture plot for US/Canada (before recategorization)
-my_admx_plot(all$s5, 'USA & Canada')
-ggsave('figures/appendix_figure9.pdf', width = 16, height = 5)
+# 3.13 Figure 15 (appendix): ternary plots
+s4 %>%
+  filter(region3 %in% c('Sub-Saharan Africa','Europe','The Americas'),
+         X3 > 0.05) %>%
+  pull(region3) %>% 
+  table()
+# 21 Sub-Saharan Africa
+# 38 Europe
+# 51 The Americas
+
+s4 %>%
+  filter(region3 %in% c('Sub-Saharan Africa','Europe','The Americas'),
+         X3 <= 0.05) %>%
+  ggtern(aes(x = X1, y = X2, z = X4, color = region3)) + # X2+X3
+  geom_point(alpha = 0.2, size = 3, show.legend = F) +
+  geom_point(data = s4 %>%
+               filter(region3 %in% c('Sub-Saharan Africa','Europe','The Americas'),
+                      X3 <= 0.05) %>%
+               group_by(region3) %>%
+               summarise(across(paste0('X',1:4), mean)),
+             shape = 1, color = 'black', size = 3, stroke = 1.5) +
+  facet_wrap(~ region3,
+             labeller = as_labeller(c(
+               'Sub-Saharan Africa' = 'Self-reported\nancestral Sub-Saharan Africans',
+               'Europe' = 'Self-reported\nancestral Europeans',
+               'The Americas' = 'Self-reported\nancestral Americans'
+             ))) +
+  scale_color_manual(name = '', values = c(`Europe`='#007ea7', `The Americas`='#dd0426',
+                                           `Sub-Saharan Africa`='#f9a620')) +
+  labs(x = expression(italic(P)^AFR), y = expression(italic(P)^EUR), # italic(P)^EAS
+       z = expression(italic(P)^IAM)) +
+  theme_custom()
+ggsave(paste0('figures/appendix_ternary_easfilter',fig_format), width = 15, height = 6)
 
