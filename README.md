@@ -3,8 +3,11 @@
 ----------------------------------------------------------------------------------
 
 Title: DNA, Self-Reported Ancestry, and Social Scientific Inquiry
+
 Journal: Demography
+
 Authors: Zhang and Trejo
+
 Date: Jan 2026
 
 ----------------------------------------------------------------------------------
@@ -36,7 +39,7 @@ Description of the data files:
 
 
 1. geoanc_codebook.xlsx: codebook for the self-reported geographic ancestry variable
-2. igsr_populations.tsv: coordinates information for the reference panel, downloaded from https:
-//www.internationalgenome.org/data-portal/population
+2. igsr_populations.tsv: coordinates information for the reference panel, downloaded from
+https://www.internationalgenome.org/data-portal/population
 3. multilevel_regions.xlsx: map the subregion categories to the corresponding region categories
 4. reference_composition.txt: composition of the reference panel
