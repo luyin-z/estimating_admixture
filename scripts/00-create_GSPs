@@ -1,0 +1,615 @@
+#!/bin/bash
+#############################################
+##---------------- 1. Init ----------------##
+#############################################
+# 1.1 create directories
+mkdir admixture_1kg
+cd admixture_1kg
+mkdir addhealth
+mkdir 1kg
+mkdir hgdp
+
+
+# 1.2 soft link to add health data
+# assuming you have add health genotype data in the "addhealth" folder
+wc -l addhealth/ahgwas.bim # 609130
+
+
+# 1.3 get 1KG
+cd 1kg
+wget https://www.dropbox.com/s/j72j6uciq5zuzii/all_hg38.pgen.zst?dl=1
+wget https://www.dropbox.com/scl/fi/fn0bcm5oseyuawxfvkcpb/all_hg38_rs.pvar.zst?rlkey=przncwb78rhz4g4ukovocdxaz&dl=1
+wget https://www.dropbox.com/scl/fi/u5udzzaibgyvxzfnjcvjc/hg38_corrected.psam?rlkey=oecjnk4vmbhc8b1p202l0ih4x&dl=1
+wget https://www.dropbox.com/s/4zhmxpk5oclfplp/deg2_hg38.king.cutoff.out.id?dl=1
+
+plink2 --zst-decompress all_hg38.pgen.zst > 1kg_all.pgen
+plink2 --zst-decompress all_hg38_rs.pvar.zst > 1kg_all.pvar
+rm *.zst
+mv hg38_corrected.psam 1kg_all.psam
+mv deg2_hg38.king.cutoff.out.id 1kg_deg2.id
+cd ..
+
+
+# 1.4 get HGDP
+cd hgdp
+wget https://www.dropbox.com/s/hppj1g1gzygcocq/hgdp_all.pgen.zst?dl=1
+wget https://www.dropbox.com/s/1mmkq0bd9ax8rng/hgdp_all.pvar.zst?dl=1
+wget https://www.dropbox.com/s/0zg57558fqpj3w1/hgdp.psam?dl=1
+
+plink2 --zst-decompress hgdp_all.pgen.zst?dl=1 > hgdp_all.pgen
+plink2 --zst-decompress hgdp_all.pvar.zst?dl=1 > hgdp_all.pvar
+plink2 --zst-decompress hgdp.psam?dl=1 > hgdp_all.psam
+cd ..
+
+
+# 1.5 get liftover and the related chain file
+wget https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver
+chmod +x ./liftOver
+wget http://hgdownload.soe.ucsc.edu/goldenPath/hg18/liftOver/hg18ToHg19.over.chain.gz
+gzip -d hg18ToHg19.over.chain.gz
+
+
+# 1.6 get ADMIXTURE
+wget https://dalexander.github.io/admixture/binaries/admixture_linux-1.3.0.tar.gz
+tar -xvf admixture_linux-1.3.0.tar.gz
+mv dist/admixture_linux-1.3.0/admixture .
+rm admixture_linux-1.3.0.tar.gz
+rm -r dist
+
+
+
+##########################################################
+##---------------- 2. Prepare reference ----------------##
+##########################################################
+# 2.1 keep biallelic SNPs shared with AH
+for d in 1kg hgdp; do
+	plink2 --pfile ${d}/${d}_all \
+	--allow-extra-chr \
+	--snps-only \
+	--set-missing-var-ids @:# \
+	--rm-dup 'exclude-all' \
+	--max-alleles 2 \
+	--chr 1-22 \
+	--extract addhealth/ahgwas.bim \
+	--make-bed \
+	--out ${d}/${d}_ah
+done
+# 1KG: 597271 variants remain
+# HGDP: 595823 variants remain
+
+
+# 2.2 liftover to CGRCh37
+for d in 1kg hgdp; do
+ 	# map to CGRCh37 using LiftOver
+	awk '{print "chr" $1, $4 -1, $4, $2 }' ${d}/${d}_ah.bim > ${d}/${d}_ah.tolift
+	./liftOver ${d}/${d}_ah.tolift hg38ToHg19.over.chain ${d}/${d}_ah ${d}/unmapped_${d}_ah
+
+	# ectract mapped variants and updated positions
+	awk '{print $4}' ${d}/${d}_ah > ${d}/${d}_ah.snps
+	awk '{print $4, $3}' ${d}/${d}_ah > ${d}/${d}_ah.pos
+
+	# update to CGRCh37
+	plink1.9 --bfile ${d}/${d}_ah \
+	--extract ${d}/${d}_ah.snps \
+	--update-map ${d}/${d}_ah.pos \
+	--make-bed \
+	--out ${d}/${d}_ah_hg19
+done
+# 1KG: 597068 variants remain
+# HGDP: 595622 variants remain
+
+
+# 2.3 merge 1KG and HGDP and remove related samples
+echo 'setDTthreads(32)
+
+args <- commandArgs(trailingOnly = TRUE)
+
+base <- fread(args[[1]], select = c(1:2,4:6)) %>%
+  setnames(., colnames(.), c("CHR", "SNP", "BP", "B.A1", "B.A2"))
+target <- fread(args[[2]], select = c(1:2,4:6)) %>%
+  setnames(., colnames(.), c("CHR", "SNP", "BP", "A1", "A2"))
+base[, SNP := ifelse(is.na(SNP), paste0(CHR,":",BP), SNP)]
+target[, SNP := ifelse(is.na(SNP), paste0(CHR,":",BP), SNP)]
+
+common <- merge(base, target, all = F)
+cat(nrow(common), "SNPs are shared between", args[[3]], "and", args[[4]], "(based on CHR, SNP, & BP)\n")
+common[, `:=`(B.A3 = fcase(B.A1=="A", "T", B.A1=="T", "A", B.A1=="C", "G", B.A1=="G", "C"),
+                B.A4 = fcase(B.A2=="A", "T", B.A2=="T", "A", B.A2=="C", "G", B.A2=="G", "C"))]
+compat <- common[(B.A1==A1 & B.A2==A2) | (B.A1==A2 & B.A2==A1) | (B.A3==A1 & B.A4==A2) | (B.A3==A2 & B.A4==A1)]
+cat(nrow(compat), "SNPs are compatible between", args[[3]], "and", args[[4]],"\n")
+flip <- compat[!(B.A1==A1 & B.A2==A2) & !(B.A1==A2 & B.A2==A1)]
+cat(nrow(flip), "SNPs requires strand flipping, performed on", args[[3]], "\n")
+
+fwrite(compat[,.(SNP)], args[[5]], col.names = F)
+if (nrow(flip)==0) {
+  cat("No strand flipping is required.\n")
+} else {
+  fwrite(flip[, .(SNP)], args[[6]], col.names = F)
+}' > find_compatible.R
+
+Rscript find_compatible.R hgdp/hgdp_ah_hg19.bim 1kg/1kg_ah_hg19.bim HGDP 1KG 1kg_hgdp.snp hgdp/flip_hgdp.snp
+# 591019 SNPs are shared between HGDP and 1KG (based on CHR, SNP, & BP)
+# 591017 SNPs are compatible between HGDP and 1KG 
+# 0 SNPs requires strand flipping, performed on HGDP 
+# No strand flipping is required.
+
+for d in 1kg hgdp; do
+	plink1.9 --bfile ${d}/${d}_ah_hg19 \
+	--extract 1kg_hgdp.snp \
+	--make-bed \
+	--out ${d}/tmp
+done
+
+awk 'NR > 1 {print 0, $0}' 1kg/1kg_deg2.id > 1kg/1kg_deg2_famid.txt
+wc -l 1kg/1kg_deg2_famid.txt # 621 1st degree and 6 2nd degree
+plink1.9 --bfile 1kg/tmp \
+--bmerge hgdp/tmp \
+--remove 1kg/1kg_deg2_famid.txt \
+--make-bed \
+--out 1kg_hgdp
+# 591017 variants and 3502 people
+
+rm 1kg/tmp.*
+rm hgdp/tmp.*
+
+
+# 2.4 find compatible SNPs with AddHealth and perform strand flipping if necessary
+Rscript find_compatible.R 1kg_hgdp.bim addhealth/ahgwas.bim 1KG-HGDP AddHealth ah_ref.snp flip_ref.snp
+# 591010 SNPs are shared between 1KG-HGDP and AddHealth (based on CHR, SNP, & BP)
+# 590999 SNPs are compatible between 1KG-HGDP and AddHealth 
+# 103495 SNPs requires strand flipping, performed on 1KG-HGDP 
+
+
+
+###################################################
+##---------------- 3. LD pruning ----------------##
+###################################################
+# 3.1 prepared AH data
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+
+ah <- fread("addhealth/ahgwas.fam", col.names = c("FID", "IID", "F", "M", "S", "P"))
+
+set.seed(218)
+unrelated <- ah %>%
+  group_by(FID) %>%
+  slice_sample(n = 1) # N = 9166
+
+fwrite(unrelated, "addhealth/ahgwas_unrelated.fam", col.names = F, sep = " ", quote = F)
+EOF
+
+plink1.9 --bfile addhealth/ahgwas \
+--extract ah_ref.snp \
+--keep addhealth/ahgwas_unrelated.fam \
+--make-bed \
+--out addhealth/to_prune
+# 590999 variants and 9166 people
+
+
+# 3.2 LD pruning
+# for unsupervised ADMIXTURE
+plink1.9 --bfile addhealth/ahgwas \
+--keep addhealth/ahgwas_unrelated.fam \
+--indep-pairwise 200 25 0.4 \
+--out addhealth/ahprune_us
+
+plink1.9 --bfile addhealth/ahgwas \
+--chr 1-22 \
+--keep addhealth/ahgwas_unrelated.fam \
+--extract addhealth/ahprune_us.prune.in \
+--a1-allele addhealth/ahgwas.bim 5 2 \
+--make-bed \
+--out addhealth/ahpruned_us
+# 280033 variants and 9166 people
+
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+
+original <- fread("addhealth/ahgwas.bim")
+pruned <- fread("addhealth/ahpruned_us.bim")
+
+anti_join(pruned, original)
+EOF
+
+# for supervised ADMIXTURE
+plink1.9 --bfile addhealth/to_prune \
+--indep-pairwise 200 25 0.4 \
+--out addhealth/ahprune
+
+plink1.9 --bfile addhealth/to_prune \
+--extract addhealth/ahprune.prune.in \
+--make-bed \
+--out addhealth/ahpruned
+# 275794 variants and 9166 people
+
+
+
+##################################################
+##---------------- 4. ADMXITURE ----------------##
+##################################################
+# 4.1 merge AH and 1KG-HGDP, keeping pruned SNPs
+plink1.9 --bfile 1kg_hgdp \
+--extract addhealth/ahprune.prune.in \
+--flip flip_ref.snp \
+--a1-allele addhealth/ahpruned.bim 5 2 \
+--make-bed \
+--out ref_to_merge
+# 103495 SNPs flipped
+# 275794 assignments made
+# 275794 variants and 3502 people
+
+plink1.9 --bfile addhealth/ahpruned \
+--bmerge ref_to_merge \
+--make-bed \
+--out ahref_all
+# 275794 variants and 12668 people
+
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+
+ah <- fread("addhealth/ahpruned.bim")
+ref <- fread("ref_to_merge.bim")
+all <- fread("ahref_all.bim")
+
+anti_join(ah, ref) # empty
+anti_join(ref, ah) # empty
+anti_join(ah, all) # 5816 with opposite reference alleles
+anti_join(all, ah) # 5816 with opposite reference alleles
+EOF
+
+
+# 4.2 prepare .pop files
+Rscript - <<'EOF'
+library(data.table); library(magrittr); library(dplyr); library(tidyr)
+
+all <- fread("ahref_all.fam", col.names = c("FID","IID","F","M","S","P"))
+
+ah <- fread("addhealth/ahgwas.fam", col.names = c("FID","IID","F","M","S","P")) %>%
+  mutate(IID = as.character(IID))
+
+kg <- fread("1kg/1kg_all.psam")
+table(kg$SuperPop)
+# AFR AMR EAS EUR SAS 
+# 893 490 585 633 601
+
+hgdp <- fread("hgdp/hgdp_all.psam")
+table(hgdp$region)
+# AFRICA            AMERICA CENTRAL_SOUTH_ASIA          EAST_ASIA 
+# 104                 61                197                223 
+# EUROPE        MIDDLE_EAST            OCEANIA 
+# 155                161                 28 
+
+ref <- kg %>%
+  filter(!Population %in% c("ASW","ACB")) %>%
+  select(IID = `#IID`, Pop = SuperPop) %>%
+  rbind(hgdp %>%
+          select(IID = `#IID`, Pop = region)) %>%
+  mutate(Pop = case_when(
+    Pop=="AFRICA" ~ "AFR",
+    Pop=="AMERICA" ~ "IAM",
+    Pop=="EAST_ASIA" ~ "EAS",
+    Pop=="EUROPE" ~ "EUR",
+    Pop=="MIDDLE_EAST" ~ "MEA",
+    Pop=="OCEANIA" ~ "OCE",
+    grepl("SOUTH|SAS|AMR", Pop) ~ NA,
+    T ~ Pop
+  ))
+
+nrow(ref)==length(unique(ref$IID)) # TRUE
+
+table(ref$Pop, useNA = "ifany")
+# AFR  EAS  EUR  IAM  MEA  OCE <NA> 
+# 807  808  788  61   161   28 1288
+
+keep_pop <- list()
+keep_pop$s2 = c("AFR","EUR")
+keep_pop$s3 <- c(keep_pop$s2, "EAS")
+keep_pop$s4 <- c(keep_pop$s3, "IAM")
+keep_pop$s5 <- c(keep_pop$s4, "MEA")
+keep_pop$s6 <- c(keep_pop$s5, "OCE")
+
+pop <- lapply(keep_pop, function(s) {
+  all %>%
+    select(FID, IID) %>%
+    left_join(ah %>% transmute(FID, IID, ah = 1)) %>%
+    mutate(FID, IID, ah) %>%
+    left_join(ref %>% filter(Pop %in% s)) %>%
+    mutate(Pop = case_when(ah==1 ~ "-", T ~ Pop)) %>%
+    drop_na(Pop)
+})
+table(pop$s6$Pop)
+#    -  AFR  EAS  EUR  IAM  MEA  OCE 
+# 9166  634  729  680   61  161   28
+
+hgdp %>%
+  transmute(Data = "HGDP", IID = `#IID`, SuperPop = region, Population = population) %>%
+  rbind(kg %>%
+          transmute(Data = "1KG", IID = `#IID`, SuperPop, Population) %>%
+          filter(!IID %in% fread("1kg/1kg_deg2.id", col.names = "IID")$IID)) %>%
+  full_join(pop$s6 %>% rename(Ancestry = Pop)) %>%
+  drop_na(Data) %>%
+  mutate(Used = factor(!is.na(Ancestry), labels = c("No","Yes")),
+         SuperPop = factor(SuperPop, levels = c("AFR","EUR","EAS","AMR","SAS",
+                                                "AFRICA","EUROPE","EAST_ASIA","AMERICA",
+                                                "MIDDLE_EAST","OCEANIA","CENTRAL_SOUTH_ASIA"))) %>%
+  group_by(Data, SuperPop, Population, Used, Ancestry) %>%
+  summarise(N = n()) %>%
+  ungroup() %>%
+  arrange(SuperPop, Population) %>%
+  fwrite("reference_composition.txt", quote = F, sep = "\t")
+
+lapply(2:6, function(i) {
+  fwrite(pop[[paste0("s",i)]][,.(Pop)], paste0("supervised",i,".pop"), col.names = F, quote = F)
+})
+
+lapply(2:6, function(i) {
+  fwrite(pop[[paste0("s",i)]][,.(FID,IID)], paste0("supervised",i,".id"), col.names = F, quote = F, sep = " ")
+})
+EOF
+
+for i in {2..6}; do
+	plink1.9 --bfile ahref_all \
+	--keep supervised${i}.id \
+	--a1-allele addhealth/ahgwas.bim 5 2 \
+	--make-bed \
+	--out supervised${i}
+done
+
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+input <- lapply(2:6, function(i) {
+	fread(paste0("supervised",i,".id"))
+})
+
+output <- lapply(2:6, function(i) {
+	fread(paste0("supervised",i,".fam")) %>%
+	select(V1, V2)
+})
+
+map2(input, output, function(x,y) identical(x,y))
+EOF
+# all TRUEs
+
+diff -s supervised2.bim supervised3.bim # identical
+diff -s supervised3.bim supervised4.bim # identical
+diff -s supervised4.bim supervised5.bim # identical
+diff -s supervised5.bim supervised6.bim # identical
+
+
+# 4.3 supervised ADMIXTURE
+for i in {2..6}; do
+	./admixture supervised${i}.bed $i --supervised -j32 -s 218 | tee supervised${i}.out
+done
+
+for i in 4 5; do
+  for p in bed bim fam pop; do
+    scp supervised${i}.${p} supervised${i}_withSE.${p} 
+  done
+  ./admixture -B supervised${i}_withSE.bed $i --supervised -j32 -s 218 | tee supervised${i}_withSE.out
+done
+
+
+# 4.4 projection to the remaining AH individuals
+plink1.9 --bfile addhealth/ahgwas \
+--extract ahref_all.bim \
+--a1-allele addhealth/ahgwas.bim 5 2 \
+--remove addhealth/ahgwas_unrelated.fam \
+--make-bed \
+--out ah_rest
+# 275794 variants and 808 people
+
+diff -s ah_rest.bim supervised2.bim # identical
+
+for i in {2..6}; do
+	scp supervised${i}.${i}.P ah_rest.${i}.P.in
+	./admixture -P ah_rest.bed $i -j32 -s 218 | tee supervised${i}_projection.out
+done
+
+for p in bed bim fam; do
+  scp ah_rest.${p} ah_rest_withSE.${p} 
+done
+for i in 4 5; do
+  scp supervised${i}_withSE.${i}.P ah_rest_withSE.${i}.P.in
+  ./admixture -B -P ah_rest_withSE.bed $i -j32 -s 218 | tee supervised${i}_withSE_projection.out
+done
+
+
+# 4.5 merge supervised ADMIXTURE outputs
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+
+ah <- fread("addhealth/ahgwas.fam", select = list("integer"=1, "character"=2),
+            col.names = c("FID", "IID"))
+
+s <- list()
+for (k in 2:6) {
+  s[[paste0("s",k)]] <- fread(paste0("supervised",k,".",k,".Q")) %>%
+    cbind(fread(paste0("supervised",k,".pop"), header = F, col.names = "Pop")) %>%
+    rbind(fread(paste0("ah_rest.",k,".Q")) %>% mutate(Pop = "-")) %>%
+    cbind(fread(paste0("supervised",k,".fam"), select = 1:2, col.names = c("FID", "IID")) %>%
+            rbind(fread("ah_rest.fam", select = 1:2, col.names = c("FID", "IID"))))
+}
+
+se <- list()
+for (k in 4:5) {
+  se[[paste0("s",k)]] <- fread(paste0("supervised",k,"_withSE.",k,".Q_se")) %>%
+    rbind(fread(paste0("ah_rest_withSE.",k,".Q_se"))) %>%
+    cbind(s[[paste0("s",k)]] %>% select(FID, IID, Pop))
+}
+
+lapply(s, function(d) {
+  d %>%
+    filter(Pop!="-") %>%
+    group_by(Pop) %>%
+    summarise(across(starts_with("V"), mean))
+})
+
+names(s$s2)[1:2] <- c("X2", "X1")
+names(s$s3)[1:3] <- c("X2", "X3", "X1")
+names(s$s4)[1:4] <- c("X2", "X3", "X1", "X4")
+names(s$s5)[1:5] <- c("X2", "X3", "X1", "X5", "X4")
+names(s$s6)[1:6] <- c("X2", "X3", "X1", "X6", "X5", "X4")
+
+names(se$s4)[1:4] <- c("X2", "X3", "X1", "X4")
+names(se$s5)[1:5] <- c("X2", "X3", "X1", "X5", "X4")
+
+output <- lapply(s, function(d) {
+  d %>%
+    select(starts_with("X"), FID, IID)
+})
+saveRDS(output, "supervised_output.rds")
+
+lapply(se, function(d) {
+  d %>%
+    filter(Pop=="-") %>%
+    select(-Pop)
+}) %>%
+  saveRDS("supervised_k45_se_output.rds")
+EOF
+
+
+# 4.5 unsupervised ADMIXTURE and projection
+plink1.9 --bfile addhealth/ahgwas \
+--extract addhealth/ahpruned_us.bim \
+--a1-allele addhealth/ahpruned_us.bim 5 2 \
+--remove addhealth/ahgwas_unrelated.fam \
+--make-bed \
+--out addhealth/ah_rest_us
+
+diff -s addhealth/ahpruned_us.bim addhealth/ah_rest_us.bim # identical
+
+for i in {2..6}; do
+  ./admixture addhealth/ahpruned_us.bed $i -j32 -s 218 | tee unsupervised${i}.out
+  scp ahpruned_us.${i}.P ah_rest_us.${i}.P.in
+  ./admixture -P addhealth/ah_rest_us.bed $i -j32 -s 218 | tee unsupervised${i}_projection.out
+done
+
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+us <- list()
+for (k in 2:6) {
+  us[[paste0('us',k)]] <- fread(paste0('ahpruned_us.',k,'.Q'), header = F) %>%
+    rbind(fread(paste0('ah_rest_us.',k,'.Q'), header = F)) %>%
+    cbind(fread("addhealth/ahpruned_us.fam", select = 1:2, col.names = c("FID", "IID")) %>%
+            rbind(fread("addhealth/ah_rest_us.fam", select = 1:2, col.names = c("FID", "IID"))))
+}
+
+lapply(us, function(d) {
+  d %>%
+    summarise(across(matches("V"), mean))
+})
+
+names(us$us2)[1:2] <- c("X2", "X1")
+names(us$us3)[1:3] <- c("X3", "X2", "X1")
+names(us$us4)[1:4] <- c("X2", "X4", "X1", "X3")
+names(us$us5)[1:5] <- c("X1", "X5", "X4", "X2", "X3")
+names(us$us6)[1:6] <- c("X2", "X5", "X3", "X6", "X4", "X1")
+
+saveRDS(us, "unsupervised_output.rds")
+EOF
+
+
+# 4.6 randomly split AH-unrelated into two subsamples and perform unsupervised ADMIXTURE
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+
+ah <- fread("addhealth/ahgwas_unrelated.fam", select = 1:2, col.names = c("FID", "IID"))
+
+set.seed(218)
+idx <- sample(nrow(ah), nrow(ah)/2) 
+
+fwrite(ah[idx,], "addhealth/ah_unrel1.id", col.names = F, sep = " ", quote = F)
+fwrite(ah[-idx,], "addhealth/ah_unrel2.id", col.names = F, sep = " ", quote = F)
+EOF
+
+for i in 1 2; do
+	plink1.9 --bfile addhealth/ahpruned_us \
+	--keep addhealth/ah_unrel${i}.id \
+  --a1-allele addhealth/ahpruned_us.bim 5 2 \
+	--make-bed \
+	--out addhealth/ah_unrel${i}
+
+	for p in fam bim bed; do
+		scp addhealth/ah_unrel${i}.${p} addhealth/ah_unrel${i}_p.${p}
+	done
+
+  for k in 4 5; do
+    ./admixture addhealth/ah_unrel${i}.bed $k -j32 -s 218 | tee unsupervised${k}_subsample${i}.out
+  done
+done
+
+for k in 4 5; do
+  scp ah_unrel1.${k}.P ah_unrel2_p.${k}.P.in
+  scp ah_unrel2.${k}.P ah_unrel1_p.${k}.P.in
+done
+
+for i in 1 2; do
+  for k in 4 5; do
+    ./admixture -P addhealth/ah_unrel${i}_p.bed $k -j32 -s 218 | tee unsupervised${k}_projection_subsample${i}.out
+  done
+done
+
+Rscript - <<'EOF'
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+
+us <- list(
+  ss1 = fread("ah_unrel1.4.Q") %>%
+    mutate(type = "estimation") %>%
+    rbind(fread("ah_unrel2_p.4.Q") %>%
+            mutate(type = "projection")) %>%
+    cbind(fread("addhealth/ah_unrel1.fam") %>%
+            rbind(fread("addhealth/ah_unrel2_p.fam")) %>%
+            select(FID = V1, IID = V2)),
+  ss2 = fread("ah_unrel2.4.Q") %>%
+    mutate(type = "estimation") %>%
+    rbind(fread("ah_unrel1_p.4.Q") %>%
+            mutate(type = "projection")) %>%
+    cbind(fread("addhealth/ah_unrel2.fam") %>%
+            rbind(fread("addhealth/ah_unrel1_p.fam")) %>%
+            select(FID = V1, IID = V2))
+)
+
+us4 <- readRDS("unsupervised_output.rds")$us4 %>% select(FID, IID, paste0("X",1:4))
+
+lapply(us, function(d) {
+  d %>%
+    left_join(us4) %>%
+    summarise(across(c(V1:V4,paste0("X",1:4)), mean))
+})
+
+us$ss1 <- us$ss1[,1:7]
+names(us$ss1)[1:4] <- c("X1","X2","X3","X4")
+us$ss2 <- us$ss2[,1:7]
+names(us$ss2)[1:4] <- c("X4","X2","X3","X1")
+
+saveRDS(us, "unsupervised_subsample_output_k4.rds")
+EOF
+
