@@ -1,7 +1,7 @@
 # estimating_admixture
 
 ----------------------------------------------------------------------------------
-[![DOI](https://zenodo.org/badge/919491394.svg)](https://doi.org/10.5281/zenodo.18715199)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18715199.svg)](https://doi.org/10.5281/zenodo.18715199)
 
 Title: DNA, Self-Reported Ancestry, and Social Scientific Inquiry
 
