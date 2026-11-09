@@ -68,7 +68,7 @@ left <- d %>%
   modify_header(stat_0 ~ '**Mean (SD) / %**')
 
 # add statistics for region/subregion data availability
-n1 <- d %>% select(starts_with('reg ')) %>% sum(na.rm = T)
+n1 <- d %>% select(starts_with('REGION ')) %>% sum(na.rm = T)
 n2 <- d %>% select(starts_with('SUBREG '), -paste0('SUBREG ',c('America','Canada','Other'))) %>% sum(na.rm = T)
 left_new <- left$table_body %>%
   filter(variable %in% c('has_reg', 'has_subreg')) %>%
@@ -1240,7 +1240,7 @@ fig2_dat <- all$s4 %>%
 
 # average genetic similarity proportions at different Ks
 fig2_prop <- fig2_dat %>%
-  summarise(across(X1:X4, function(x) x = weighted.mean(x, ipwgt))) %>%
+  summarise(across(X1:X4, mean)) %>%
   gather(ID, prop) %>%
   mutate(prop = prop/sum(prop))
 
@@ -1317,9 +1317,9 @@ rho4 <- cor(all$s3$X3, all$s4$X3 + all$s4$X4)
 plot(riv_data, plot_area = c(0.9,0.9), srt = 0, textcex = 0.8, node_margin = 0.3)
 text(0.36, -0.095, expression(italic('K')==2), xpd = NA)
 text(0.64, -0.095, expression(italic('K')==3), xpd = NA)
-text(0.64, -0.15, bquote(paste(rho['2,3'], ' = ', .(sprintf('%.2f', rho3)))), xpd = NA)
+text(0.64, -0.15, bquote(paste(rho['2,3'], ' = ', .(sub("^(-?)0\\.", "\\1.", sprintf("%.2f", rho3))))), xpd = NA)
 text(0.92, -0.095, expression(italic('K')==4), xpd = NA)
-text(0.92, -0.15, bquote(paste(rho['3,4'], ' = ', .(sprintf('%.2f', rho4)))), xpd = NA)
+text(0.92, -0.15, bquote(paste(rho['3,4'], ' = ', .(sub("^(-?)0\\.", "\\1.", sprintf("%.2f", rho4))))), xpd = NA)
 text(1.05, 0.94, expression(paste('(', italic('P')^IAM, ')')), cex = 0.8, xpd = NA)
 text(1.05, 0.8, expression(paste('(', italic('P')^EAS, ')')), cex = 0.8, xpd = NA)
 text(1.05, 0.45, expression(paste('(', italic('P')^EUR, ')')), cex = 0.8, xpd = NA)
@@ -1345,18 +1345,24 @@ fig2_right <- all$s4 %>%
   geom_line(aes(x = X, y = frac, group = anc, color = anc), linewidth = 1) + 
   geom_hline(yintercept = seq(0, 0.75, 0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
   geom_vline(xintercept = seq(0, 0.75, 0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
-  scale_y_continuous(expand = c(0,0), breaks = seq(0,1,0.25), limits = c(0,1)) +
-  scale_x_continuous(expand = c(0,0), breaks = seq(0,1,0.25), limits = c(0,1)) +
-  labs(x = bquote(italic(P)), y = 'Cumulative Probability', color = '') +
+  scale_y_continuous(expand = c(0,0), breaks = seq(0,1,0.25), limits = c(0,1),
+                     labels = function(x) sub("^0\\.", ".", sprintf("%.2f", x))) +
+  scale_x_continuous(expand = c(0,0), breaks = seq(0,1,0.25), limits = c(0,1),
+                     labels = function(x) sub("^0\\.", ".", sprintf("%.2f", x))) +
+  labs(x = bquote(bolditalic(P)), y = 'Cumulative Probability', color = '') +
   scale_color_manual(values = c(AFR= '#ffc300', EUR = '#219ebc', EAS = '#a7c957',
                                 IAM = '#e76f51'),
                      labels = c(AFR = bquote(italic(P)^'AFR'), EUR = bquote(italic(P)^'EUR'),
                                 EAS = bquote(italic(P)^'EAS'), IAM = bquote(italic(P)^'IAM'))) +
   theme_custom() +
-  theme(legend.position=c(0.9,0.15), legend.background = element_rect(fill='transparent'))
+  theme(axis.title = element_text(face = "bold"), text = element_text(family = "Arial"),
+        legend.position=c(0.9,0.15), legend.background = element_rect(fill='transparent'))
 
-ggsave(paste0('figures/figure2',fig_format), width = 18, height = 6,
-       plot_grid(as_grob(riverplot), as_grob(fig2_right), align = 'hv', nrow = 1, rel_heights = c(1,3)))
+quartz(type = "pdf", file = paste0('figures/figure2_styled',fig_format), 
+       width = 9, height = 12, family = "Arial")
+par(family = "Arial")
+plot_grid(as_grob(riverplot), as_grob(fig2_right), align = 'hv', nrow = 2)
+dev.off()
 
 
 # 3.2 Figure 3 (main text): skin color scatter plots
@@ -1429,7 +1435,7 @@ my_skin_plot <- function(discrete = F) {
              )) %>%
       filter(ytype!='White', region %in% c('Sub-Saharan Africa', 'The Americas'))
     
-    texty <- 0.9
+    texty <- 1.20
     rugy <- 1.01
     rugyend <- 1.05
     yintercept <- seq(0,1,0.25)
@@ -1460,7 +1466,7 @@ my_skin_plot <- function(discrete = F) {
     rugy <- 5.1
     rugyend <- 5.5
     yintercept <- seq(0,5,0.5)
-    ylabel <- 'Skin tone'
+    ylabel <- 'Skin Tone'
     ylimit <- c(0,5.5)
     ybreaks <- seq(0.5,5,0.5)
     linetype <- 'Version'
@@ -1472,14 +1478,18 @@ my_skin_plot <- function(discrete = F) {
     summarise(n = max(row_number())) %>%
     group_by(anc, ytype) %>%
     mutate(
-      x = case_when(region=='Sub-Saharan Africa' & anc!='AFR' ~ 0.78, 
-                    discrete ~ 0.18,
+      x = case_when(discrete ~ 0.02,
+                    region=='Sub-Saharan Africa' & anc!='AFR' ~ 0.78,
                     T ~ 0.02),
       y = texty,
-      n = paste0('Self-Reported Ancestral',
-                 ifelse(discrete,'\n',' '),
-                 ifelse(region=='Sub-Saharan Africa','Sub-Saharan Africans','Americans'),
-                 '\n(N = ', n, ')'),
+      n = paste0(
+        "<b>Self-reported ancestral",
+        " ",
+        ifelse(region == "Sub-Saharan Africa",
+               "sub-Saharan Africans", "Americans"),
+        "<br><i>N</i> = ", format(n, big.mark = ",", trim = TRUE),
+        "</b>"
+      ),
       rowno = ifelse(region=='The Americas',2,1)
     ) %>%
     ungroup() %>%
@@ -1538,19 +1548,22 @@ my_skin_plot <- function(discrete = F) {
                  aes(x = x, y = y, color = region, shape = ytype), size = 2, alpha = 0.4) +
       geom_line(data = fig3_dat3, 
                 aes(x = x, y = hat_y, color = region, linetype = ytype), linewidth = 1) +
-      geom_text(data = fig3_dat1, 
-                aes(x = x, y = y, label = n, color = region), show.legend = F, size = 3.5) +
+      ggtext::geom_richtext(data = fig3_dat1,
+                            aes(x = x, y = y, label = n), color = 'black',
+                            family = "Arial", hjust = 0, vjust = 1, size = 3.5, fill = NA,
+                            label.color = NA, label.padding = grid::unit(0, "pt"),
+                            show.legend = FALSE) +
       geom_segment(data = fig3_data1 %>% select(-ytype) %>% unique(), 
                    aes(x = x, xend = x, y = 1.01, yend = 1.05, color = region), alpha = 0.1) + 
       geom_hline(yintercept = seq(0,1,0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
       geom_vline(xintercept = seq(0,1,0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
       scale_x_continuous(name = '', limit = c(0,1), breaks = seq(0.25,1,0.25), expand = c(0,0)) +
-      scale_y_continuous(name = 'Fraction with a given skin tone (or darker)', limit = c(0,1.05), breaks = seq(0.25,1,0.25), expand = c(0,0)) +
+      scale_y_continuous(name = 'Fraction with a given skin tone (or darker)', limit = c(0,1.22), breaks = seq(0.25,1,0.25), expand = c(0,0)) +
       facet_grid(region ~ anc, switch = 'x', labeller = label_bquote(cols = bold(italic(P)^.(as.character(anc))))) +
-      scale_color_manual(name = 'Self-Reported Geographic Ancestry', 
+      scale_color_manual(name = 'Self-reported geographic ancestry', 
                          values = c(`The Americas`='#dd0426', `Sub-Saharan Africa`='#f9a620'),
                          labels = c(`The Americas`='Ancestral Americans', 
-                                    `Sub-Saharan Africa`='Ancestral Sub-Saharan Africans')) +
+                                    `Sub-Saharan Africa`='Ancestral sub-Saharan Africans')) +
       scale_shape_manual(name = 'Interviewer-Rated Skin Tone', values = c(0,1,2,5)) +
       scale_linetype_manual(name = 'Interviewer-Rated Skin Tone', values = c(1,3,2,6)) +
       theme_custom() +
@@ -1564,33 +1577,46 @@ my_skin_plot <- function(discrete = F) {
                  aes(x = x, y = y, color = region), shape = 1, size = 2, alpha = 0.1) +
       geom_line(data = fig3_dat3 %>% filter(main==1, ytype=='Residualized'),
                 aes(x = x, y = hat_y, color = region), linewidth = 1) +
-      geom_text(data = fig3_dat1 %>% filter(main==1), 
-                aes(x = x, y = y, label = n, color = region), show.legend = F, hjust = 0, size = 3.5) +
+      ggtext::geom_richtext(data = fig3_dat1 %>% filter(main == 1),
+                            aes(x = x, y = y, label = n), color = 'black',
+                            family = "Arial", hjust = 0, size = 3.5, fill = NA,
+                            label.color = NA, label.padding = grid::unit(0, "pt"),
+                            show.legend = FALSE) +
       geom_segment(data = fig3_data1 %>% filter(main==1) %>% select(-ytype) %>% unique(), 
                    aes(x = x, xend = x, y = rugy, yend = rugyend, color = region), alpha = 0.1) + 
       geom_hline(yintercept = yintercept, color = 'gray', linetype = 'dotted', linewidth = 0.3) +
       geom_vline(xintercept = seq(0,1,0.25), color = 'gray', linetype = 'dotted', linewidth = 0.3) +
-      scale_x_continuous(name = '', limit = c(0,1), breaks = seq(0.25,1,0.25), expand = c(0,0)) +
-      scale_y_continuous(name = ylabel, limit = ylimit, breaks = ybreaks, expand = c(0,0)) +
-      facet_wrap(rowno ~ anc, scales = 'free', strip.position = 'bottom', 
-                 labeller = label_bquote(cols = bold(italic(P)^.(as.character(anc))))) +
-      scale_color_manual(name = 'Self-Reported Geographic Ancestry', 
+      scale_x_continuous(name = '', limit = c(0,1), breaks = seq(0.25,1,0.25), expand = c(0,0),
+                         labels = function(x) sub("^0\\.", ".", sprintf("%.2f", x))) +
+      scale_y_continuous(name = ylabel, limit = ylimit, breaks = ybreaks, expand = c(0,0),
+                         labels = function(x) sub("^0\\.", ".", sprintf("%.2f", x))) +
+      facet_wrap(~ rowno + anc, scales = 'free', strip.position = 'bottom', nrow = 3,
+                 labeller = label_bquote(cols = bolditalic(P)^bold(.(as.character(anc))))) +
+      scale_color_manual(name = 'Self-reported geographic ancestry', 
                          values = c(`The Americas`='#dd0426', `Sub-Saharan Africa`='#f9a620'),
                          labels = c(`The Americas`='Ancestral Americans', 
-                                    `Sub-Saharan Africa`='Ancestral Sub-Saharan Africans')) +
+                                    `Sub-Saharan Africa`='Ancestral sub-Saharan Africans')) +
       theme_custom() +
-      theme(legend.position = 'top', legend.box = 'vertical', legend.spacing.y = unit(0.05,'cm'),
-            strip.text.y = element_blank(), strip.placement = 'outside')
+      theme(text = element_text(family = "Arial"), axis.title = element_text(face = "bold"),
+            legend.position = 'bottom', legend.box = 'vertical', legend.spacing.y = unit(0.05,'cm'),
+            legend.box.spacing = unit(0, "pt"), legend.margin = margin(0, 0, 0, 0),
+            legend.location = "plot", strip.text.y = element_blank(), strip.placement = 'outside')
   }
 }
 
 # Figure 3 (main text): skin tone as continuous
+quartz(type = "pdf", file = paste0('figures/figure3_styled',fig_format),
+       width = 6.5, height = 12, family = "Arial")
+par(family = "Arial")
 my_skin_plot(F)
-ggsave(paste0('figures/figure3',fig_format), width = 12, height = 5)
+dev.off()
 
 # Figure 17 (appendix): skin tone as discrete
+quartz(type = "pdf", file = paste0('figures/appendix_ordinal_figure3',fig_format),
+       width = 10, height = 8, family = "Arial")
+par(family = "Arial")
 my_skin_plot(T)
-ggsave(paste0('figures/appendix_ordinal_figure3',fig_format), width = 10, height = 8)
+dev.off()
 
 
 # 3.3 Figure 4 (main text): self-reported, interviewer-classified race, & skin color
@@ -1604,9 +1630,9 @@ d <- d %>%
 # racial classification by skin tone category
 prepare_irace <- function(data, ga_sample) {
   if (ga_sample=='Sub-Saharan Africa') {
-    y_label <- 'Fraction classified as Black'
+    y_label <- 'Fraction Classified as Black'
   } else if (ga_sample=='The Americas') {
-    y_label <- 'Fraction classified as non-White'
+    y_label <- 'Fraction Classified as Non-White'
   } else {
     print('No such ancestral region category.')
   }
@@ -1646,9 +1672,9 @@ pd <- pd %>%
 prepare_irace_bygsp <- function(data, ga_sample, focal_gsp) {
   
   if (ga_sample=='Sub-Saharan Africa') {
-    y_label <- 'Fraction classified as Black'
+    y_label <- 'Fraction Classified as Black'
   } else if (ga_sample=='The Americas') {
-    y_label <- 'Fraction classified as non-White'
+    y_label <- 'Fraction Classified as Non-White'
   } else {
     print('No such ancestral region category.')
   }
@@ -1659,16 +1685,18 @@ prepare_irace_bygsp <- function(data, ga_sample, focal_gsp) {
   unique_data <- data %>% select(aid, paste0('X',1:4)) %>% unique()
   mx <- lm(as.formula(paste(focal_gsp, '~', paste(covX, collapse = ' + '))), unique_data)
   unique_data$res_X0 <- mx$residuals + mean(unique_data[[focal_gsp]])
-  data <- data %>% left_join(unique_data %>% select(aid, res_X0))
-  my <- lm(as.formula(paste('y ~', paste(covX, collapse = ' + '))), data)
-  data$res_y <- my$residuals + mean(data$y)
-  
   # split each skin tone category into two equally size subgroups
-  data <- data %>%
+  median_groups <- data %>%
+    distinct(aid, skin) %>%
+    left_join(unique_data %>% select(aid, res_X0), by = "aid") %>%
     arrange(skin, res_X0) %>%
     group_by(skin) %>%
-    mutate(lmedian = ifelse(row_number()<=max(row_number())/2,1,0)) %>%
-    ungroup()
+    mutate(lmedian = as.integer(row_number() <= n() / 2)) %>%
+    ungroup() %>%
+    select(aid, skin, lmedian)
+  data <- data %>% left_join(median_groups, by = c("aid", "skin"))
+  my <- lm(as.formula(paste('y ~', paste(covX, collapse = ' + '))), data)
+  data$res_y <- my$residuals + mean(data$y)
   
   if (any(duplicated(data$aid))) {
     dat <- data %>%
@@ -1756,9 +1784,9 @@ pd3 <- pd2 %>%
 
 my_irace_plot <- function(ga_sample, panel_num) {
   if (ga_sample=='Sub-Saharan Africa') {
-    y_label <- 'Fraction classified as Black'
+    y_label <- 'Fraction Classified as Black'
   } else if (ga_sample=='The Americas') {
-    y_label <- 'Fraction classified as non-White'
+    y_label <- 'Fraction Classified as Non-White'
   } else {
     print('No such ancestral region category.')
   }
@@ -1777,27 +1805,56 @@ my_irace_plot <- function(ga_sample, panel_num) {
     filter(sample==ga_sample, panel==panel_num) %>%
     ggplot(aes(x = skin_label2, y = y, fill = as.factor(1-lmedian))) +
     geom_bar(stat = 'identity', position = 'dodge') +
-    geom_text(aes(y = lower, label = sprintf('%.2f',y)), position = position_dodge(0.9), vjust = 1.5) +
+    geom_text(aes(y = lower, label = sub("^0\\.", ".", sprintf("%.2f", y))), 
+              position = position_dodge(0.9), vjust = 1.5) +
     geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, position = position_dodge(0.9)) +
-    geom_text(data = pd2 %>% filter(sample==ga_sample, panel==panel_num, grepl('White', skin)),
-              aes(y = 1, label = sample_label2), size = 3.6) +
+    geom_text(
+      data = pd2 %>%
+        filter(sample == ga_sample, panel == panel_num) %>%
+        distinct(sample_label2) %>%
+        mutate(heading = if (ga_sample == "Sub-Saharan Africa") {
+          "Self-reported ancestral sub-Saharan Africans"
+        } else {
+          "Self-reported ancestral Americans"
+        }),
+      aes(x = -Inf, y = 1.08, label = heading),
+      inherit.aes = FALSE, hjust = -0.02, fontface = "bold", family = "Arial"
+    ) +
+    geom_text(
+      data = pd2 %>%
+        filter(sample == ga_sample, panel == panel_num) %>%
+        distinct(sample_label2) %>%
+        mutate(n_label = paste0(
+          "bolditalic(N) ~ bold('= ",
+          format(readr::parse_number(sub(".*N = ", "", sample_label2)),
+                 big.mark = ",", trim = TRUE),
+          "')"
+        )),
+      aes(x = -Inf, y = 0.96, label = n_label),
+      inherit.aes = FALSE, parse = TRUE, hjust = -0.02, family = "Arial"
+    ) +
     geom_text(data = pd3 %>% filter(sample==ga_sample, panel==panel_num),
               aes(label = pvalue), color = '#bf0603', show.legend = FALSE) +
-    scale_y_continuous(name = y_label, expand = c(0,0), breaks = seq(0,1,0.25)) +
+    scale_y_continuous(name = y_label, expand = c(0,0), breaks = seq(0,1,0.25),
+                       labels = function(x) sub("^0\\.", ".", sprintf("%.2f", x))) +
     coord_cartesian(ylim = c(0, 1.2)) + 
-    scale_x_discrete(name = '') +
+    scale_x_discrete(name = 'Skin Tone') +
     scale_fill_manual(name = bquote(italic('P')^.(anc)),
                       values = c(`0`= rgb(col2rgb(color)[1]/255, col2rgb(color)[2]/225, col2rgb(color)[3]/225, alpha = 0.4), `1`=color),
-                      labels = c(`0`='< median', `1`='>=median')) +
+                      labels = c(`0` = '< Median', `1` = '\u2265 Median')) +
     theme_custom() +
-    theme(legend.position = 'top')
+    theme(legend.position = 'bottom', text = element_text(family = "Arial"),
+          axis.title = element_text(face = "bold"))
   
   return(p)
 }
 
-ggsave('figures/figure4.pdf', width = 8, height = 12,
-       plot_grid(my_irace_plot('Sub-Saharan Africa',1), my_irace_plot('The Americas',2), 
-                 my_irace_plot('The Americas',3), nrow = 3))
+quartz(type = "pdf", file = paste0('figures/figure4_styled',fig_format), 
+       width = 8, height = 12, family = "Arial")
+par(family = "Arial")
+plot_grid(my_irace_plot('Sub-Saharan Africa',1), my_irace_plot('The Americas',2), 
+          my_irace_plot('The Americas',3), nrow = 3)
+dev.off()
 
 # Figure 19 (appendix): racial classification by skin tone
 pd %>%
@@ -1807,8 +1864,8 @@ pd %>%
   geom_text(data = pd %>% filter(grepl('White', skin)), 
             aes(y = 1, label = sample_label), size = 3.6) +
   facet_wrap(~ sample, nrow = 2, strip.position = 'left', scales='free',
-             labeller = as_labeller(c(`Sub-Saharan Africa` = 'Fraction classified as Black',
-                                      `The Americas` = 'Fraction classified as non-White'))) +
+             labeller = as_labeller(c(`Sub-Saharan Africa` = 'Fraction Classified as Black',
+                                      `The Americas` = 'Fraction Classified as Non-White'))) +
   scale_y_continuous(name = '', expand = c(0,0), breaks = seq(0,1,0.25), limits = c(0,1.2)) +
   scale_x_discrete(name = '') +
   theme_custom() +

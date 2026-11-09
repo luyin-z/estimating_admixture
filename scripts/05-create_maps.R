@@ -96,7 +96,7 @@ subregion_grp <- ne_countries(scale = 'medium', returnclass = 'sf',
   )
 
 # general geometry data
-world_data <- gisco_get_countries() %>%
+world_data <- gisco_get_countries(year = 2020) %>%
   # remove Antarctica
   filter(ISO3_CODE!='ATA') %>%
   left_join(as.data.frame(subregion_grp) %>%
@@ -235,7 +235,8 @@ world_data <- world_data %>%
 french_guiana <- french_guiana %>% left_join(freq_anc)
 native_america <- native_america %>% left_join(freq_anc)
 NA_coord <- NA_coord %>% left_join(freq_anc)
-subregion_data <- subregion_data %>% left_join(freq_anc)
+subregion_data <- subregion_data %>% 
+  left_join(freq_anc %>% filter(subregion != 'US & Canada'), by = 'subregion')
 
 # 2.2 visualize average GSPs
 my_gsp_map <- function(gsp, anc_label, color) {
@@ -245,6 +246,8 @@ my_gsp_map <- function(gsp, anc_label, color) {
     geom_point(data = NA_coord, aes(x = X, y = Y, fill = !!sym(gsp)), size = 4, shape = 21) +
     geom_sf(data = country_NA, fill = 'gray75') +
     scale_fill_gradient(name = anc_label,
+                        labels = function(x) sub("^0\\.", ".", sprintf("%.2f", x)),
+                        guide = guide_colourbar(display = "rectangles", nbin = 512),
                         low = 'white', high = color, na.value = 'gray75', limits = c(0,1)) +
     theme_void() +
     theme(legend.position = 'bottom')
@@ -254,7 +257,7 @@ my_gsp_map <- function(gsp, anc_label, color) {
 }
 
 maps <- list()
-maps$afr_map <- my_gsp_map('X1', expression(italic('P')^AFR~'(Sub-Saharan African)'), '#ffc300')
+maps$afr_map <- my_gsp_map('X1', expression(italic('P')^AFR~'(sub-Saharan African)'), '#ffc300')
 maps$eur_map <- my_gsp_map('X2', expression(italic('P')^EUR~'(European)'), '#219ebc')
 maps$eas_map <- my_gsp_map('X3', expression(italic('P')^EAS~'(East Asian)'), '#a7c957')
 maps$iam_map <- my_gsp_map('X4', expression(italic('P')^IAM~'(Indigenous American)'), '#e76f51')
@@ -337,8 +340,11 @@ subregion_map <- ggplot() +
 
 
 # 3. Export --------------------------------------------------------------------
-ggsave(paste0('figures/figure1',fig_format), width = 16, height = 12,
-       plot_grid(maps$afr_map, maps$eur_map, maps$eas_map, maps$iam_map, ncol = 2))
+quartz(type = "pdf", file = paste0('figures/figure1_styled',fig_format), 
+       width = 16, height = 12, family = "Arial")
+par(family = "Arial")
+plot_grid(maps$afr_map, maps$eur_map, maps$eas_map, maps$iam_map, ncol = 2)
+dev.off()
 
 ggsave(paste0('figures/appendix_region_map',fig_format), subregion_map, width = 16, height = 12)
 
